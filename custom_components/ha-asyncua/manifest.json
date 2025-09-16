@@ -1,15 +1,19 @@
 {
-  "domain": "asyncua",
-  "name": "asyncua",
-  "codeowners": ["@KVSoong"],
+  "domain": "ha-asyncua",
+  "name": "ha-asyncua",
+  "codeowners": [
+    "@KVSoong"
+  ],
   "config_flow": true,
   "dependencies": [],
   "documentation": "https://www.home-assistant.io/integrations/asyncua",
   "homekit": {},
-  "integration_type": "helper",
-  "iot_class": "local_polling",
+  "integration_type": "hub",
+  "iot_class": "local_push",
   "issue_tracker": "https://github.com/KVSoong/asyncua/issues",
-  "requirements": ["asyncua==1.0.2"],
+  "requirements": [
+    "asyncua==1.1.8"
+  ],
   "ssdp": [],
   "version": "v0.1.2",
   "zeroconf": []

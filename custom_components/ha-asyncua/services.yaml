@@ -2,7 +2,7 @@ set_value:
   description: Write to an opcua node.
   target:
     entity:
-      integration: asyncua
+      integration: ha-asyncua
   fields:
     hub:
       required: true

@@ -1,15 +1,15 @@
 """Platform for sensor integration."""
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Union
+from typing import Any
 
+import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
-import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import (
@@ -60,7 +60,6 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up asyncua_sensor coordinator_nodes."""
-
     # {"hub": [node0, node1]}
     # where node0 equals {"name": "node0", "unique_id": "node0", ...}.
 
@@ -70,7 +69,7 @@ async def async_setup_platform(
 
     # Compile dictionary of {hub: [node0, node1, ...]}
     for _idx_node, val_node in enumerate(config[CONF_NODES]):
-        if val_node[CONF_NODE_HUB] not in coordinator_nodes.keys():
+        if val_node[CONF_NODE_HUB] not in coordinator_nodes:
             coordinator_nodes[val_node[CONF_NODE_HUB]] = []
         coordinator_nodes[val_node[CONF_NODE_HUB]].append(val_node)
 
@@ -109,10 +108,10 @@ class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
         hub: str,
         node_id: str,
         device_class: Any,
-        unique_id: Union[str, None] = None,
+        unique_id: str | None = None,
         state_class: str = "measurement",
         precision: int = 2,
-        unit_of_measurement: Union[str, None] = None,
+        unit_of_measurement: str | None = None,
     ) -> None:
         """Initialize the entity."""
         super().__init__(coordinator=coordinator)

@@ -1,17 +1,17 @@
-"""Platform for switch integration."""
+"""Platform for switch integration with subscription-based updates + forced refresh."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
+import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-
 from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
-from homeassistant.const import STATE_OFF, STATE_UNAVAILABLE, STATE_OK
+from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
-import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
@@ -55,29 +55,24 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up asyncua_switch coordinator_nodes."""
-
     coordinator_nodes: dict[str, list[dict[str, str]]] = {}
     coordinators: dict[str, AsyncuaCoordinator] = {}
     asyncua_switches: list = []
 
-    for _idx_node, val_node in enumerate(config[CONF_NODES]):
-        if val_node[CONF_NODE_HUB] not in coordinator_nodes:
-            coordinator_nodes[val_node[CONF_NODE_HUB]] = []
-        coordinator_nodes[val_node[CONF_NODE_HUB]].append(val_node)
+    for val_node in config[CONF_NODES]:
+        coordinator_nodes.setdefault(val_node[CONF_NODE_HUB], []).append(val_node)
 
-    for key_coordinator, val_coordinator in coordinator_nodes.items():
-        # Get the respective asyncua coordinator
-        if key_coordinator not in hass.data[DOMAIN]:
-            raise ConfigEntryError(
-                f"Asyncua hub {key_coordinator} not found. Specify a valid asyncua hub in the configuration."
-            )
-        coordinators[key_coordinator] = hass.data[DOMAIN][key_coordinator]
-        coordinators[key_coordinator].add_sensors(sensors=val_coordinator)
+    for hub_name, nodes in coordinator_nodes.items():
+        if hub_name not in hass.data[DOMAIN]:
+            msg = f"Asyncua hub {hub_name} not found. Specify a valid asyncua hub in the configuration."
+            raise ConfigEntryError(msg)
+        coordinators[hub_name] = hass.data[DOMAIN][hub_name]
+        coordinators[hub_name].add_sensors(sensors=nodes)
 
-        for _idx_sensor, val_sensor in enumerate(val_coordinator):
+        for val_sensor in nodes:
             asyncua_switches.append(
                 AsyncuaSwitch(
-                    coordinator=coordinators[key_coordinator],
+                    coordinator=coordinators[hub_name],
                     name=val_sensor[CONF_NODE_NAME],
                     hub=val_sensor[CONF_NODE_HUB],
                     node_id=val_sensor[CONF_NODE_ID],
@@ -85,14 +80,15 @@ async def async_setup_platform(
                     unique_id=val_sensor.get(CONF_NODE_UNIQUE_ID),
                 )
             )
+
     async_add_entities(asyncua_switches)
-    for idx_switch, val_switch in enumerate(asyncua_switches):
-        await val_switch.async_init()
-        _LOGGER.debug("Initialized switch %s - %s", idx_switch, val_switch.attr_name)
+    # for idx_switch, switch in enumerate(asyncua_switches):
+    #     await switch.async_init()
+    #     _LOGGER.debug("Initialized switch %s - %s", idx_switch, switch.attr_name)
 
 
 class AsyncuaSwitch(SwitchEntity, CoordinatorEntity[AsyncuaCoordinator]):
-    """A switch implementation for Asyncua OPCUA nodes."""
+    """A switch implementation for Asyncua OPCUA nodes with subscription cache."""
 
     def __init__(
         self,
@@ -110,56 +106,50 @@ class AsyncuaSwitch(SwitchEntity, CoordinatorEntity[AsyncuaCoordinator]):
             unique_id if unique_id is not None else f"{DOMAIN}.{hub}.{node_id}"
         )
         self._attr_available = STATE_UNAVAILABLE
-        self._available = STATE_UNAVAILABLE
         self._attr_device_class = SwitchDeviceClass.SWITCH
-        self._attr_is_on: bool | None
+        self._attr_is_on: bool | None = None
         self._hub = hub
         self._coordinator = coordinator
         self._node_id = node_id
         self._addr_di = addr_di if addr_di is not None else node_id
 
     @property
-    def attr_name(self):
-        """Return __attr_name variable."""
+    def attr_name(self) -> str:
+        """Return switch name."""
         return self._attr_name
 
     @property
     def is_on(self) -> bool | None:
-        """Check if OPCUA connection is available, set availability state to unavailable on connection error."""
+        """Return the current state from subscription cache."""
         if not self.coordinator.hub.connected:
-            self._attr_is_on = None
             self._attr_available = STATE_UNAVAILABLE
-            self._available = STATE_UNAVAILABLE
-            return self._attr_is_on
-        # Return node state and set availability to OK
-        self._attr_is_on = self.coordinator.hub.cache_val.get(
-            self._attr_unique_id, None
-        )
+            return None
+
+        val = self.coordinator.hub.cache_val.get(self._addr_di)
+        self._attr_is_on = bool(val) if val is not None else None
         self._attr_available = STATE_OK
-        self._available = STATE_OK
         return self._attr_is_on
 
-    async def async_init(self) -> None:
-        """Initialize switch to get latest value."""
-        await self._async_set_value()
+    async def _async_set_value(self, val: bool) -> None:
+        """Write value to OPCUA node and refresh state if no notification is received."""
+        await self.coordinator.hub.set_value(nodeid=self._node_id, value=val)
 
-    async def _async_set_value(self, val: bool = None, **kwargs) -> None:
-        """Set boolean value to node then execute refresh to get updated DI value."""
-        if val is not None:
-            await self.coordinator.hub.set_value(
-                nodeid=self._node_id,
-                value=val,
-                **kwargs,
-            )
-        new_val = await self.coordinator.hub.get_value(nodeid=self._addr_di)
-        self._attr_is_on = new_val
-        self._attr_available = True
-        await self.coordinator.async_refresh()
+        # 1. On écrit l'état dans HA immédiatement pour réactivité
+        self._attr_is_on = val
+        self.async_write_ha_state()
+
+        # 2. On force un refresh manuel après un léger délai
+        #    pour synchroniser si le serveur n'a pas émis de DataChange
+        async def delayed_refresh() -> None:
+            await asyncio.sleep(0.5)  # délai très court (500 ms)
+            await self.coordinator.async_request_refresh()
+
+        # await asyncio.create_task(delayed_refresh())
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn the entity on."""
-        await self._async_set_value(val=True)
+        """Turn the switch on."""
+        await self._async_set_value(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the entity off."""
-        await self._async_set_value(val=False)
+        """Turn the switch off."""
+        await self._async_set_value(False)
