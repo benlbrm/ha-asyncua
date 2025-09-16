@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from typing import Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.components.switch import SwitchDeviceClass
+from homeassistant.components.binary_sensor import (
+    BinarySensorEntity,
+    BinarySensorDeviceClass,
+)
 from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
@@ -40,10 +44,7 @@ NODE_SCHEMA = {
     ]
 }
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    schema=NODE_SCHEMA,
-    extra=vol.ALLOW_EXTRA,
-)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
 
 
 async def async_setup_platform(
@@ -52,9 +53,8 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua_Binary_Sensor coordinator_nodes."""
+    """Set up asyncua Binary Sensors from YAML configuration."""
     coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    coordinators: dict[str, AsyncuaCoordinator] = {}
     entities: list = []
 
     for val_node in config[CONF_NODES]:
@@ -62,27 +62,28 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            msg = f"Asyncua hub {hub_name} not found. Specify a valid asyncua hub in the configuration."
-            raise ConfigEntryError(msg)
-        coordinators[hub_name] = hass.data[DOMAIN][hub_name]
-        coordinators[hub_name].add_sensors(sensors=nodes)
+            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
+        coordinator.add_sensors(sensors=nodes)
 
-        for val_sensor in nodes:
+        for node in nodes:
             entities.append(
                 AsyncuaBinarySensor(
-                    coordinator=coordinators[hub_name],
-                    name=val_sensor[CONF_NODE_NAME],
-                    hub=val_sensor[CONF_NODE_HUB],
-                    node_id=val_sensor[CONF_NODE_ID],
-                    unique_id=val_sensor.get(CONF_NODE_UNIQUE_ID),
+                    coordinator=coordinator,
+                    name=node[CONF_NODE_NAME],
+                    hub=hub_name,
+                    node_id=node[CONF_NODE_ID],
+                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
                 )
             )
 
     async_add_entities(entities)
 
 
-class AsyncuaBinarySensor(BinarySensorEntity, CoordinatorEntity[AsyncuaCoordinator]):
-    """Representation of an OPCUA binary sensor."""
+class AsyncuaBinarySensor(CoordinatorEntity[AsyncuaCoordinator], BinarySensorEntity):
+    """OPC UA Binary sensor using coordinator cache."""
+
+    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
 
     def __init__(
         self,
@@ -90,38 +91,36 @@ class AsyncuaBinarySensor(BinarySensorEntity, CoordinatorEntity[AsyncuaCoordinat
         name: str,
         hub: str,
         node_id: str,
-        addr_di: str | None = None,
         unique_id: str | None = None,
     ) -> None:
-        """Initialize the switch."""
         super().__init__(coordinator=coordinator)
         self._attr_name = name
-        self._attr_unique_id = (
-            unique_id if unique_id is not None else f"{DOMAIN}.{hub}.{node_id}"
-        )
-        self._attr_available = STATE_UNAVAILABLE
-        self._attr_device_class = SwitchDeviceClass.SWITCH
-        self._attr_is_on: bool | None = None
-        self._hub = hub
-        self._coordinator = coordinator
         self._node_id = node_id
-        self._addr_di = addr_di if addr_di is not None else node_id
-
-    @property
-    def is_on(self) -> bool:
-        """Return True if sensor is ON (value truthy)."""
-        val = self._coordinator.hub.cache_val.get(self._node_id)
-        if val is None:
-            return False
-        try:
-            return bool(val)
-        except Exception:
-            _LOGGER.warning(
-                "Cannot convert value %s of node %s to bool", val, self._node_id
-            )
-            return False
+        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
+        self._attr_available = STATE_UNAVAILABLE
+        self._attr_is_on: bool | None = None
 
     @property
     def available(self) -> bool:
-        """Return True if hub is connected."""
-        return self._coordinator.hub.connected
+        """Availability based on hub connection."""
+        return self.coordinator.hub.connected
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True if the cached value is truthy."""
+        if not self.coordinator.hub.connected:
+            self._attr_available = STATE_UNAVAILABLE
+            return None
+        val = self.coordinator.hub.cache_val.get(self._node_id)
+        try:
+            self._attr_is_on = bool(val) if val is not None else False
+        except Exception:
+            _LOGGER.warning("Cannot convert %s to bool for node %s", val, self._node_id)
+            self._attr_is_on = False
+        self._attr_available = STATE_OK
+        return self._attr_is_on
+
+    async def async_added_to_hass(self) -> None:
+        """Request coordinator refresh when added."""
+        await self.coordinator.async_request_refresh()

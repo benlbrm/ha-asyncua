@@ -1,4 +1,4 @@
-"""Platform for sensor integration."""
+"""Sensor platform for ha-asyncua."""
 
 from __future__ import annotations
 
@@ -7,15 +7,13 @@ from typing import Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import (
-    ConfigType,
-    DiscoveryInfoType,
-)
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import AsyncuaCoordinator
@@ -47,10 +45,7 @@ NODE_SCHEMA = {
     ]
 }
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    schema=NODE_SCHEMA,
-    extra=vol.ALLOW_EXTRA,
-)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
 
 
 async def async_setup_platform(
@@ -59,47 +54,39 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua_sensor coordinator_nodes."""
-    # {"hub": [node0, node1]}
-    # where node0 equals {"name": "node0", "unique_id": "node0", ...}.
-
+    """Set up asyncua sensors from YAML configuration."""
     coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    coordinators: dict[str, AsyncuaCoordinator] = {}
-    asyncua_sensors: list = []
+    entities: list[AsyncuaSensor] = []
 
-    # Compile dictionary of {hub: [node0, node1, ...]}
-    for _idx_node, val_node in enumerate(config[CONF_NODES]):
-        if val_node[CONF_NODE_HUB] not in coordinator_nodes:
-            coordinator_nodes[val_node[CONF_NODE_HUB]] = []
-        coordinator_nodes[val_node[CONF_NODE_HUB]].append(val_node)
+    # Regrouper les nodes par hub
+    for val_node in config[CONF_NODES]:
+        coordinator_nodes.setdefault(val_node[CONF_NODE_HUB], []).append(val_node)
 
-    for key_coordinator, val_coordinator in coordinator_nodes.items():
-        # Get the respective asyncua coordinator
-        if key_coordinator not in hass.data[DOMAIN].keys():
-            raise ConfigEntryError(
-                f"Asyncua hub {key_coordinator} not found. Specify a valid asyncua hub in the configuration."
-            )
-        coordinators[key_coordinator] = hass.data[DOMAIN][key_coordinator]
-        coordinators[key_coordinator].add_sensors(sensors=val_coordinator)
+    for hub_name, nodes in coordinator_nodes.items():
+        if hub_name not in hass.data[DOMAIN]:
+            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
+        coordinator.add_sensors(sensors=nodes)
 
-        # Create sensors with injecting respective asyncua coordinator
-        for _idx_sensor, val_sensor in enumerate(val_coordinator):
-            asyncua_sensors.append(
+        for node in nodes:
+            entities.append(
                 AsyncuaSensor(
-                    coordinator=coordinators[key_coordinator],
-                    name=val_sensor[CONF_NODE_NAME],
-                    unique_id=val_sensor.get(CONF_NODE_UNIQUE_ID),
-                    hub=val_sensor[CONF_NODE_HUB],
-                    node_id=val_sensor[CONF_NODE_ID],
-                    device_class=val_sensor.get(CONF_NODE_DEVICE_CLASS),
-                    unit_of_measurement=val_sensor.get(CONF_NODE_UNIT_OF_MEASUREMENT),
+                    coordinator=coordinator,
+                    name=node[CONF_NODE_NAME],
+                    hub=hub_name,
+                    node_id=node[CONF_NODE_ID],
+                    device_class=node.get(CONF_NODE_DEVICE_CLASS),
+                    state_class=node.get(CONF_NODE_STATE_CLASS, "measurement"),
+                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
+                    unit_of_measurement=node.get(CONF_NODE_UNIT_OF_MEASUREMENT),
                 )
             )
-    async_add_entities(new_entities=asyncua_sensors)
+
+    async_add_entities(entities)
 
 
 class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
-    """A sensor implementation for Asyncua OPCUA nodes."""
+    """Representation of an OPCUA sensor."""
 
     def __init__(
         self,
@@ -107,56 +94,48 @@ class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
         name: str,
         hub: str,
         node_id: str,
-        device_class: Any,
-        unique_id: str | None = None,
+        device_class: str | None = None,
         state_class: str = "measurement",
+        unique_id: str | None = None,
         precision: int = 2,
         unit_of_measurement: str | None = None,
     ) -> None:
-        """Initialize the entity."""
+        """Initialize the sensor."""
         super().__init__(coordinator=coordinator)
         self._attr_name = name
-        self._attr_unique_id = (
-            unique_id if unique_id is not None else f"{DOMAIN}.{hub}.{node_id}"
+        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
+        self._attr_device_class = (
+            SensorDeviceClass(device_class)
+            if device_class and device_class in SensorDeviceClass.__members__.values()
+            else None
         )
-        self._attr_available = False
-        self._attr_device_class = device_class
-        self._attr_native_unit_of_measurement = unit_of_measurement
-        self._attr_native_value = None
         self._attr_state_class = state_class
         self._attr_suggested_display_precision = precision
-        # self._attr_unit_of_measurement = unit_of_measurement
-        self._hub = hub
+        self._attr_native_unit_of_measurement = unit_of_measurement
+        self._attr_native_value: Any = None
+        self._hub_name = hub
         self._node_id = node_id
-        self._sensor_data = self._parse_coordinator_data(
-            coordinator_data=coordinator.data
-        )
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
 
     @property
-    def unique_id(self) -> str | None:
-        """Return the unique_id of the sensor."""
-        return self._attr_unique_id
+    def available(self) -> bool:
+        """Return True if the hub is connected and the node has a value."""
+        return self.coordinator.hub.connected
 
     @property
-    def node_id(self) -> str:
-        """Return the node address provided by the OPCUA server."""
-        return self._node_id
-
-    def _parse_coordinator_data(
-        self,
-        coordinator_data: dict[str, Any],
-    ) -> Any:
-        """Parse the value from the mapped coordinator."""
-        if self._attr_name is None:
-            raise ConfigEntryError(
-                f"Unable to find {self._attr_name} in coordinator {self.coordinator.name}"
-            )
-        return coordinator_data.get(self._attr_name)
+    def native_value(self) -> Any:
+        """Return the cached OPCUA value for this node."""
+        value = self.coordinator.hub.cache_val.get(self._node_id)
+        self._attr_native_value = value
+        return value
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        """Handle update of the data."""
-        self._attr_native_value = self._parse_coordinator_data(
-            coordinator_data=self.coordinator.data,
+        """Handle updated data from coordinator (triggered by subscription)."""
+        _LOGGER.debug(
+            "Sensor %s (%s) updated with value: %s",
+            self._attr_name,
+            self._node_id,
+            self.coordinator.hub.cache_val.get(self._node_id),
         )
         self.async_write_ha_state()

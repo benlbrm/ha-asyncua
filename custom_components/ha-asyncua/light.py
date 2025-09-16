@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 from typing import Any
+
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.light import LightEntity
-
-# from homeassistant.components.light import LightDeviceClass
-from homeassistant.components.light import ColorMode
+from homeassistant.components.light import LightEntity, ColorMode
 from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
@@ -47,10 +45,7 @@ NODE_SCHEMA = {
     ]
 }
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    schema=NODE_SCHEMA,
-    extra=vol.ALLOW_EXTRA,
-)
+PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
 
 
 async def async_setup_platform(
@@ -59,9 +54,8 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua_Light coordinator_nodes."""
+    """Set up asyncua Light coordinator_nodes from YAML configuration."""
     coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    coordinators: dict[str, AsyncuaCoordinator] = {}
     entities: list = []
 
     for val_node in config[CONF_NODES]:
@@ -69,29 +63,28 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            msg = f"Asyncua hub {hub_name} not found. Specify a valid asyncua hub in the configuration."
-            raise ConfigEntryError(msg)
-        coordinators[hub_name] = hass.data[DOMAIN][hub_name]
-        coordinators[hub_name].add_sensors(sensors=nodes)
+            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
+        coordinator.add_sensors(sensors=nodes)
 
-        for val_sensor in nodes:
+        for node in nodes:
             entities.append(
                 AsyncuaLight(
-                    coordinator=coordinators[hub_name],
-                    name=val_sensor[CONF_NODE_NAME],
-                    hub=val_sensor[CONF_NODE_HUB],
-                    node_id=val_sensor[CONF_NODE_ID],
-                    node_id_on=val_sensor[CONF_NODE_ID_LIGHT_ON],
-                    node_id_off=val_sensor[CONF_NODE_ID_LIGHT_OFF],
-                    unique_id=val_sensor.get(CONF_NODE_UNIQUE_ID),
+                    coordinator=coordinator,
+                    name=node[CONF_NODE_NAME],
+                    hub=hub_name,
+                    node_id=node[CONF_NODE_ID],
+                    node_id_on=node.get(CONF_NODE_ID_LIGHT_ON),
+                    node_id_off=node.get(CONF_NODE_ID_LIGHT_OFF),
+                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
                 )
             )
 
     async_add_entities(entities)
 
 
-class AsyncuaLight(LightEntity, CoordinatorEntity[AsyncuaCoordinator]):
-    """Representation of an OPCUA light."""
+class AsyncuaLight(CoordinatorEntity[AsyncuaCoordinator], LightEntity):
+    """OPC UA Light using coordinator cache."""
 
     _attr_supported_color_modes = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF
@@ -106,68 +99,66 @@ class AsyncuaLight(LightEntity, CoordinatorEntity[AsyncuaCoordinator]):
         node_id_off: str | None = None,
         unique_id: str | None = None,
     ) -> None:
-        """Initialize the light."""
         super().__init__(coordinator=coordinator)
         self._attr_name = name
-        self._attr_unique_id = (
-            unique_id if unique_id is not None else f"{DOMAIN}.{hub}.{node_id}"
-        )
+        self._node_id = node_id
+        self._node_id_on = node_id_on or node_id
+        self._node_id_off = node_id_off or node_id
+        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
+        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
         self._attr_available = STATE_UNAVAILABLE
         self._attr_is_on: bool | None = None
-        self._hub = hub
-        self._coordinator = coordinator
-        self._node_id = node_id
-        self._node_id_on = node_id_on if node_id_on is not None else node_id
-        self._node_id_off = node_id_off if node_id_off is not None else node_id
 
     @property
-    def attr_name(self) -> str:
-        """Return switch name."""
-        return self._attr_name
+    def available(self) -> bool:
+        return self.coordinator.hub.connected
 
     @property
     def is_on(self) -> bool | None:
-        """Return the current state from subscription cache."""
         if not self.coordinator.hub.connected:
             self._attr_available = STATE_UNAVAILABLE
             return None
-
         val = self.coordinator.hub.cache_val.get(self._node_id)
-        self._attr_is_on = bool(val) if val is not None else None
+        self._attr_is_on = bool(val) if val is not None else False
         self._attr_available = STATE_OK
         return self._attr_is_on
 
-    async def async_init(self) -> None:
-        """Initialize light state from OPCUA node."""
-        await self._async_refresh_state()
+    async def _write_and_refresh(self, nodeid: str, value: bool) -> None:
+        hub = self.coordinator.hub
+        if not hub.connected:
+            _LOGGER.debug("Hub disconnected, attempting reconnect before write")
+            try:
+                await asyncio.wait_for(hub.connect(), timeout=5)
+            except Exception as e:
+                _LOGGER.error("Reconnect before write failed: %s", e)
+                self._attr_available = STATE_UNAVAILABLE
+                self.async_write_ha_state()
+                return
 
-    async def _async_refresh_state(self) -> None:
-        """Read current state from OPCUA server."""
-        # 1. On écrit l'état dans HA immédiatement pour réactivité
-        val = self._coordinator.hub.cache_val.get(self._node_id)
-        self._attr_is_on = bool(val) if val is not None else False
-        self._attr_available = (
-            STATE_OK if self._coordinator.hub.connected else STATE_UNAVAILABLE
-        )
+        # optimistic UI update
+        self._attr_is_on = value
         self.async_write_ha_state()
 
-        # 2. On force un refresh manuel après un léger délai
-        #    pour synchroniser si le serveur n'a pas émis de DataChange
+        try:
+            await asyncio.wait_for(hub.set_value(nodeid=nodeid, value=value), timeout=5)
+        except Exception as e:
+            _LOGGER.error("Write failed for node %s: %s", nodeid, e)
+            asyncio.create_task(hub.schedule_reconnect())
+            self._attr_available = STATE_UNAVAILABLE
+            self.async_write_ha_state()
+            return
+
+        # delayed refresh to pick up any subscription notification
         async def delayed_refresh() -> None:
-            await asyncio.sleep(0.5)  # délai très court (500 ms)
+            await asyncio.sleep(0.5)
             await self.coordinator.async_request_refresh()
 
-    # @property
-    # def is_on(self) -> bool | None:
-    #     """Return True if the light is ON."""
-    #     return self._attr_is_on
+        asyncio.create_task(delayed_refresh())
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn the light on via OPCUA write."""
-        await self._coordinator.hub.set_value(nodeid=self._node_id_on, value=True)
-        await self._async_refresh_state()
+        _LOGGER.debug("Turning ON %s", self.name)
+        await self._write_and_refresh(nodeid=self._node_id_on, value=True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn the light off via OPCUA write."""
-        await self._coordinator.hub.set_value(nodeid=self._node_id_off, value=True)
-        await self._async_refresh_state()
+        _LOGGER.debug("Turning OFF %s", self.name)
+        await self._write_and_refresh(nodeid=self._node_id_off, value=True)
