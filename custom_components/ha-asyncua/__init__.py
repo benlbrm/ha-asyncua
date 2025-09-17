@@ -1,4 +1,5 @@
-"""ha-asyncua: core module with OpcuaHub and AsyncuaCoordinator.
+"""
+ha-asyncua: core module with OpcuaHub and AsyncuaCoordinator.
 
 Provides:
 - async_setup(...) to register hubs from YAML
@@ -16,8 +17,8 @@ import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from asyncua import Client, ua
 from asyncua.common import ua_utils
-from asyncua.ua.uatypes import DataValue
 from asyncua.ua.uaerrors import UaError
+from asyncua.ua.uatypes import DataValue
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -36,9 +37,6 @@ from .const import (
     CONF_HUB_URL,
     CONF_HUB_USERNAME,
     CONF_NODE_ID,
-    CONF_NODE_NAME,
-    CONF_NODE_ID_LIGHT_ON,
-    CONF_NODE_ID_LIGHT_OFF,
     DOMAIN,
     SERVICE_SET_VALUE,
 )
@@ -252,7 +250,8 @@ class OpcuaHub:
             _LOGGER.info("Disconnected from OPC UA server %s", self._hub_url)
 
     async def subscribe_nodes(self, node_key_pair: dict[str, str]) -> None:
-        """Create subscription for provided node ids and read initial values.
+        """
+        Create subscription for provided node ids and read initial values.
 
         Safe: will attempt connect first. If not connected after attempt, returns.
         """
@@ -412,7 +411,8 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         return self._hub
 
     def add_sensors(self, sensors: list[dict[str, str]]) -> bool:
-        """Register sensors and schedule a subscription setup.
+        """
+        Register sensors and schedule a subscription setup.
 
         The node_key_pair stores mapping nodeid->nodeid so we can subscribe easily.
         """
@@ -420,16 +420,42 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         for val in sensors:
             if val not in self._sensors:
                 self._sensors.append(val)
-                node_id = (
-                    val.get(CONF_NODE_ID)
-                    or val.get(CONF_NODE_ID_LIGHT_ON)
-                    or val.get(CONF_NODE_ID_LIGHT_OFF)
+                _LOGGER.debug(
+                    "add_sensors incoming sensor dict keys: %s", list(val.keys())
                 )
-                if node_id:
-                    self._node_key_pair[node_id] = node_id
-                    _LOGGER.debug(
-                        "Registered node_id %s for hub %s", node_id, self._hub.hub_name
-                    )
+                _LOGGER.debug(
+                    "add_sensors incoming sensor dict val: %s", list(val.values())
+                )
+
+                # collect all node ids present in the sensor dict (not only the first)
+                expected_keys = {
+                    #     CONF_NODE_ID,
+                    #     CONF_NODE_ID_LIGHT_ON,
+                    #     CONF_NODE_ID_LIGHT_OFF,
+                    #     CONF_NODE_ID_COVER_CLOSE,
+                    #     CONF_NODE_ID_COVER_OPEN,
+                    #     CONF_NODE_ID_COVER_STOP,
+                    #     CONF_NODE_ID_COVER_POSITION,
+                    #     CONF_NODE_ID_COVER_SET_POSITION,
+                }
+
+                for key, value in val.items():
+                    if not value:
+                        continue
+                    # accept known constant keys or legacy/user keys starting with nodeid_ / node_id_
+                    if key in expected_keys or key.startswith(
+                        (CONF_NODE_ID, "node_id_")
+                    ):
+                        node_id = value
+                        if node_id:
+                            if node_id not in self._node_key_pair:
+                                self._node_key_pair[node_id] = node_id
+                                _LOGGER.debug(
+                                    "Registered node_id %s (source key=%s) for hub %s",
+                                    node_id,
+                                    key,
+                                    self._hub.hub_name,
+                                )
 
         # schedule subscription setup in background
         if not self._subscription_task or self._subscription_task.done():
