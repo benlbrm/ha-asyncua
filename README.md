@@ -10,7 +10,23 @@ I found an older project which uses the python-opcua, which is deprecated and de
 
 ## Table of contents
 
-**[`Installation`](#installation)** **[`Asyncua-Coordinator`](#asyncua-coordinator)** **[`Sensor`](#sensors-entities)** **[`Binary-Sensor`](#binary-sensors-entities)** **[`Switch`](#switch-entities)** **[`Directory`](#-directory-structure)** **[`Donate`](#donate)**
+**[`Installation`](#installation)**
+
+**[`Asyncua-Coordinator`](#asyncua-coordinator)**
+
+**[`Sensor`](#sensors-entities)**
+
+**[`Binary-Sensor`](#binary-sensors-entities)**
+
+**[`Switch`](#switch-entities)**
+
+**[`Light`](#light-entities)**
+
+**[`Cover`](#cover-entities)**
+
+**[`Directory`](#-directory-structure)**
+
+**[`Donate`](#donate)**
 
 <br>
 
@@ -125,8 +141,8 @@ This entity allows you to create any type of device class binary sensor specifie
           device_class: "power" # Device class according to Homeassistant binary sensors
           hub: "plc-01" # Defined Asyncua coordinator
           nodeid: "ns=1;s=1000" # Node id from OPCUA server
-        - name: "binary-sensor-01" 
-          unique_id: "binary-sensor-01" 
+        - name: "binary-sensor-01"
+          unique_id: "binary-sensor-01"
           device_class: "power"
           hub: "plc-01"
           nodeid: "ns=1;s=1000"
@@ -179,6 +195,75 @@ This entity allow you to create a switch entity which can be a representative of
 | `hub` | string | **Required** | Corresponded OPCUA hub defined in **[`asyncua-coordinator`](#asyncua-coordinator)** **name** key |
 | `nodeid` | string | **Required** | node id address for the digital output |
 | `nodeid_switch_di` | string | Optional | node id address for the digital input. If not specified, `nodeid_switch_do` node is used for the latest state |
+
+</details>
+
+
+## Light Entities
+
+This entity allow you to create a light entity. Paste the following example into your `configuration.yaml` file and update the values.
+
+  ```yaml
+  light:
+    - platform: asyncua
+      nodes:
+        - name: "light_bureau"
+          unique_id: "light_bureau"
+          hub: "plc-01"
+          nodeid: "ns=6;s=::Lights:Telerupteurs[0].Light"
+          nodeid_light_on: "ns=6;s=::Lights:Telerupteurs[0].SwitchOn"
+          nodeid_light_off: "ns=6;s=::Lights:Telerupteurs[0].SwitchOff"
+  ```
+
+<details>
+
+<summary>Options (YAML + descriptions)</summary>
+
+| Name | Type | Requirement | Description |
+| - | - | - | - |
+| `name` | string | **Required** | **Unique** identifier for each switch |
+| `unique_id` | string | Optional | Entity ID stored in homeassistant |
+| `hub` | string | **Required** | Corresponded OPCUA hub defined in **[`asyncua-coordinator`](#asyncua-coordinator)** **name** key |
+| `nodeid` | string | **Required** | node id address for the digital output |
+| `nodeid_light_on` | string | **Required** | node id address for the switch on contact. |
+| `nodeid_light_off` | string | **Required** | node id address for the switch off contact. |
+
+</details>
+
+
+## Cover Entities
+
+This entity allow you to create a cover entity. Paste the following example into your `configuration.yaml` file and update the values.
+
+  ```yaml
+  light:
+    - platform: asyncua
+      nodes:
+        # Room
+        - name: "Cover_Room"
+          unique_id: "cover_Room"
+          hub: "plc-01"
+          nodeid_cover_position: "ns=6;s=::Covers:Cover_Room.Position"
+          nodeid_cover_open: "ns=6;s=::Covers:cmdCoverChambreRoomOpen"
+          nodeid_cover_close: "ns=6;s=::Covers:cmdCoverChambreRoomClose"
+          nodeid_cover_stop: "ns=6;s=::Covers:cmdCoverChambreRoomStop"
+          nodeid_cover_set_position: "ns=6;s=::Covers:cmdCoverChambreRoomSetPosition"
+  ```
+
+<details>
+
+<summary>Options (YAML + descriptions)</summary>
+
+| Name | Type | Requirement | Description |
+| - | - | - | - |
+| `name` | string | **Required** | **Unique** identifier for each switch |
+| `unique_id` | string | Optional | Entity ID stored in homeassistant |
+| `hub` | string | **Required** | Corresponded OPCUA hub defined in **[`asyncua-coordinator`](#asyncua-coordinator)** **name** key |
+| `nodeid_cover_position` | string | **Required** | node id address for the cover position |
+| `nodeid_cover_open` | string | **Required** | node id address for the switch to open cover. |
+| `nodeid_cover_close` | string | **Required** | node id address for the switch to close cover. |
+| `nodeid_cover_stop` | string | Optional | node id address for the switch to stop cover. |
+| `nodeid_cover_set_position` | string | Optional | node id address for the set position of the cover. |
 
 </details>
 
@@ -257,8 +342,8 @@ switch asyncua: !include_dir_merge_list asyncua-switch/
       device_class: "power" # Device class according to Homeassistant binary sensors
       hub: "plc-01" # Defined Asyncua coordinator
       nodeid: "ns=1;s=1000" # Node id from OPCUA server
-    - name: "binary-sensor-01" 
-      unique_id: "binary-sensor-01" 
+    - name: "binary-sensor-01"
+      unique_id: "binary-sensor-01"
       device_class: "power"
       hub: "plc-01"
       nodeid: "ns=1;s=1000"
