@@ -374,7 +374,9 @@ class OpcuaHub:
     async def notify_update(self) -> None:
         """Notify coordinator (if present) that data changed."""
         if self._coordinator:
-            await self._coordinator.async_request_refresh()
+            # Immediately push the latest cache to the coordinator and notify listeners.
+            # Use a shallow copy to avoid concurrent mutation of the shared cache.
+            self._coordinator.async_set_updated_data({**self.cache_val})
 
     async def shutdown(self) -> None:
         """Shutdown hub: cancel reconnect task and disconnect client."""
