@@ -41,6 +41,7 @@ from .const import (
     SERVICE_SET_VALUE,
 )
 
+# logging.getLogger("asyncua").setLevel(logging.WARNING)
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
 
@@ -254,6 +255,9 @@ class OpcuaHub:
         Create subscription for provided node ids and read initial values.
 
         Safe: will attempt connect first. If not connected after attempt, returns.
+        Improved: detect server ServiceFault / BadNoSubscription and force a full
+        reconnect/resubscribe attempt once. Iterate over a stable snapshot of nodes
+        to avoid concurrent-dict mutation errors.
         """
         await self.connect()
         if not self._connected or self._shutdown:
@@ -268,31 +272,102 @@ class OpcuaHub:
                 _LOGGER.debug("Error deleting old subscription: %s", e)
             self._subscription = None
 
-        try:
-            handler = AsyncuaSubscriptionHandler(self)
-            self._subscription = await self.client.create_subscription(100, handler)
-            _LOGGER.info("Subscription created (hub=%s)", self._hub_name)
-            # subscribe to nodes
-            for nodeid in node_key_pair.values():
-                try:
-                    node = self.client.get_node(nodeid)
-                    await self._subscription.subscribe_data_change(node)
-                    # attempt to read initial value with timeout
-                    try:
-                        val = await asyncio.wait_for(node.read_value(), timeout=3)
-                        self.cache_val[nodeid] = val
-                        _LOGGER.debug("Initial read %s = %s", nodeid, val)
-                    except Exception as e:
-                        _LOGGER.debug("Initial read failed for %s: %s", nodeid, e)
-                except Exception as e:
-                    _LOGGER.warning("Failed to subscribe node %s: %s", nodeid, e)
-            _LOGGER.info(
-                "Subscribed to %d nodes for hub %s", len(node_key_pair), self._hub_name
+        # Use a stable snapshot of node ids to avoid "dictionary changed size during iteration"
+        node_ids = list(node_key_pair.values())
+
+        async def _create_subscription() -> bool:
+            """Try to create a subscription and return True on success."""
+            try:
+                handler = AsyncuaSubscriptionHandler(self)
+                # create subscription with handler that will call back into hub
+                self._subscription = await self.client.create_subscription(100, handler)
+                _LOGGER.info("Subscription created (hub=%s)", self._hub_name)
+                return True
+            except Exception as exc:
+                _LOGGER.warning("Failed to create subscription: %s", exc)
+                return False
+
+        created = await _create_subscription()
+        if not created:
+            # On first failure attempt a defensive reconnect then retry once.
+            _LOGGER.debug(
+                "First subscription creation failed, attempting defensive reconnect (hub=%s)",
+                self._hub_name,
             )
-        except Exception as exc:
-            _LOGGER.error("Failed to create subscription: %s", exc)
-            # force reconnect flow
-            await self.schedule_reconnect()
+            try:
+                await self.disconnect()
+            except Exception:
+                _LOGGER.debug("Disconnect during recovery failed", exc_info=True)
+
+            try:
+                await self.connect()
+            except Exception:
+                _LOGGER.debug("Reconnect attempt failed", exc_info=True)
+
+            created = await _create_subscription()
+            if not created:
+                _LOGGER.error(
+                    "Could not create subscription after retry, scheduling reconnect (hub=%s)",
+                    self._hub_name,
+                )
+                await self.schedule_reconnect()
+                return
+
+        # subscribe to nodes using the stable snapshot
+        for nodeid in node_ids:
+            try:
+                node = self.client.get_node(nodeid)
+                try:
+                    # subscribe_data_change may raise if server-side subscription state is invalid
+                    await self._subscription.subscribe_data_change(node)
+                except Exception as exc:
+                    msg = str(exc)
+                    _LOGGER.warning(
+                        "subscribe_data_change failed for %s: %s", nodeid, exc
+                    )
+
+                    # Detect server-side subscription errors that require full reconnect.
+                    if any(
+                        x in msg
+                        for x in (
+                            "BadNoSubscription",
+                            "BadSubscriptionIdInvalid",
+                            "ServiceFault",
+                        )
+                    ):
+                        _LOGGER.warning(
+                            "Server reports invalid/stale subscription for %s: %s. Forcing full reconnect/resubscribe.",
+                            nodeid,
+                            msg,
+                        )
+                        # try to cleanup and schedule a reconnect/resubscribe
+                        try:
+                            await self.disconnect()
+                        except Exception:
+                            _LOGGER.debug(
+                                "Disconnect while handling stale subscription failed",
+                                exc_info=True,
+                            )
+                        await asyncio.sleep(1)
+                        await self.schedule_reconnect()
+                        # stop processing further nodes now — reconnect task will resubscribe whole node list
+                        return
+                    # otherwise continue with other nodes
+                    continue
+
+                # attempt to read initial value with timeout
+                try:
+                    val = await asyncio.wait_for(node.read_value(), timeout=3)
+                    self.cache_val[nodeid] = val
+                    _LOGGER.debug("Initial read %s = %s", nodeid, val)
+                except Exception as e:
+                    _LOGGER.debug("Initial read failed for %s: %s", nodeid, e)
+            except Exception as e:
+                _LOGGER.warning(
+                    "Failed to prepare subscription for node %s: %s", nodeid, e
+                )
+
+        _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
 
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Write a value to a node, with safety: connect first, timeout, and reconnect on failure."""
