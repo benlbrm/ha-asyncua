@@ -1,0 +1,48 @@
+# The contents of this file is based on https://github.com/home-assistant/core/blob/dev/pyproject.toml
+
+target-version = "py313"
+
+[lint]
+select = [
+    "ALL",
+]
+
+ignore = [
+    "ANN001",  # Missing type annotation for function argument
+    "ANN002",  # Missing type annotation for *args
+    "ANN003",  # Missing type annotation for **kwargs
+    "ANN401",  # Dynamically typed expressions (typing.Any) are disallowed
+    "ARG001",  # Unused function argument (discovery_info required by HA API)
+    "ARG002",  # Unused method argument (common in HA callbacks like **kwargs)
+    "BLE001",  # Do not catch blind exception (common pattern in HA for robustness)
+    "COM812",  # incompatible with formatter
+    "D102",    # Missing docstring in public method
+    "D107",    # Missing docstring in __init__
+    "D203",    # no-blank-line-before-class (incompatible with formatter)
+    "D212",    # multi-line-summary-first-line (incompatible with formatter)
+    "D401",    # First line of docstring should be in imperative mood
+    "FBT001",  # Boolean-typed positional argument in function definition
+    "FBT003",  # Boolean positional value in function call
+    "ISC001",  # incompatible with formatter
+    "N999",    # Invalid module name (ha-asyncua contains hyphen)
+    "PERF401", # Use list.extend (optimization suggestion)
+    "PLR0912", # Too many branches
+    "PLR0913", # Too many arguments (common in entity constructors)
+    "PLR0915", # Too many statements
+    "RUF006",  # Store a reference to asyncio.create_task (common HA pattern)
+    "TRY300",  # Consider moving to else block
+    "TRY401",  # Redundant exception object in logging.exception
+    "S105",    # Possible hardcoded password (false positive for constant names)
+    "SLF001",  # Private member access (sometimes needed)
+    "SIM102",  # Nested if statements (style preference)
+    "E501",    # Line too long (comments and log messages)
+]
+
+[lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[lint.pyupgrade]
+keep-runtime-typing = true
+
+[lint.mccabe]
+max-complexity = 25

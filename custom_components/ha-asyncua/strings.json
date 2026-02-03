@@ -6,7 +6,7 @@
       "fields": {
         "hub": {
           "name": "hub",
-          "description": "OPCUA hub name of the node configured in the asyncua section."
+          "description": "OPCUA hub name of the node configured in the ha-asyncua section."
         },
         "nodeid": {
           "name": "nodeid",

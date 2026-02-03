@@ -1,6 +1,6 @@
 """Constants for the asyncua integration."""
 
-DOMAIN = "asyncua"
+DOMAIN = "ha-asyncua"
 
 """Constant required for asnycua hub"""
 CONF_HUB_ID = "name"
@@ -21,11 +21,28 @@ CONF_NODE_STATE_CLASS = "state_class"
 CONF_NODE_UNIQUE_ID = "unique_id"
 CONF_NODE_UNIT_OF_MEASUREMENT = "unit_of_measurement"
 
+"""Constant required for opcua entities identified as a light"""
+CONF_NODE_ID_LIGHT_ON = "nodeid_light_on"
+CONF_NODE_ID_LIGHT_OFF = "nodeid_light_off"
+
 """Constant required for opcua entities identified as a contactor or switch"""
 CONF_NODE_SWITCH_DI = "nodeid_switch_di"
 
-"""COnstant required to set values"""
+"""Constant required to set values"""
 ATTR_NODE_HUB = "hub"
 ATTR_NODE_ID = "nodeid"
 ATTR_VALUE = "value"
 SERVICE_SET_VALUE = "set_value"
+
+"""Constant required for opcua entities identified as a cover"""
+CONF_NODE_ID_COVER_POSITION = "nodeid_cover_position"
+CONF_NODE_ID_COVER_OPEN = "nodeid_cover_open"
+CONF_NODE_ID_COVER_CLOSE = "nodeid_cover_close"
+CONF_NODE_ID_COVER_STOP = "nodeid_cover_stop"
+CONF_NODE_ID_COVER_SET_POSITION = "nodeid_cover_set_position"
+
+"""Constant required for opcua entities identified as a number"""
+CONF_NODE_ID_NUMBER_MIN = "nodeid_number_min"
+CONF_NODE_ID_NUMBER_MAX = "nodeid_number_max"
+CONF_NODE_ID_NUMBER_STEP = "nodeid_number_step"
+CONF_NODE_ID_NUMBER_MODE = "nodeid_number_mode"

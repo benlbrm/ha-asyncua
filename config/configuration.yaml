@@ -1,0 +1,26 @@
+# https://www.home-assistant.io/integrations/default_config/
+default_config:
+
+# https://www.home-assistant.io/integrations/homeassistant/
+homeassistant:
+  debug: true
+
+# https://www.home-assistant.io/integrations/logger/
+logger:
+  default: info
+  logs:
+    custom_components.ha-asyncua: debug
+
+ha-asyncua:
+  - name: "plc-01" # Unique name to identify the server. Will be used by the sensors to indicate which server to get the node value.
+    url: "opc.tcp://192.168.4.201:4840/" # URL of the server.
+    scan_interval: 10 # Optional. Interval for coordinator to read from OPCUA. Default is set at 30s.
+    username: dev # Optional username
+    password: dev # Optional password
+
+binary_sensor ha-asyncua: !include_dir_merge_list opcua/binary_sensors/
+sensor ha-asyncua: !include_dir_merge_list opcua/sensors/
+switch ha-asyncua: !include_dir_merge_list opcua/switchs/
+light ha-asyncua: !include_dir_merge_list opcua/lights/
+cover ha-asyncua: !include_dir_merge_list opcua/covers/
+number ha-asyncua: !include_dir_merge_list opcua/numbers/
