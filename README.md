@@ -42,7 +42,7 @@ I found an older project which uses the python-opcua, which is deprecated and de
 
 1. If HACS is not installed yet, download it following the instructions on [https://hacs.xyz/docs/setup/download/](https://hacs.xyz/docs/use/download/download/)
 2. Proceed to the HACS initial configuration following the instructions on [https://hacs.xyz/docs/configuration/basic](https://hacs.xyz/docs/configuration/basic)
-3. Copy this project directory, https://github.com/KVSoong/asyncua.
+3. Copy this project directory, https://github.com/benlbrm/ha-asyncua.
 4. Navigate to HACS in HA and select _Integration_.
 5. At the top right corner, select the vertical 3 dots and click **Custom repositories**.
 6. Paste the link in the `Repository` input field and select **Integration** for the Categeroy dropdown select.
@@ -52,7 +52,7 @@ I found an older project which uses the python-opcua, which is deprecated and de
 
 </details>
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kvsoong&repository=asyncua&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=benlbrm&repository=ha-asyncua&category=integration)
 
 <br>
 
