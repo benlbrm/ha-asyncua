@@ -1,10 +1,11 @@
 # OPCUA Client over Asyncua
 
-This is an hacs integration using asyncua to connect various industrial PLC to HA. My initial approach was to develop a gateway which connect the PLC over RESTful API. After a couple of integration for projects, I found that it would be beneficial to the community to have a custom integration in HA for OPC UA servers.
+> **Note**: This is a fork of [KVSoong/asyncua](https://github.com/KVSoong/asyncua) with additional features including OPC UA subscriptions support, improved reconnection handling, and light/cover entities.
+
+This is an HACS integration using asyncua to connect various industrial PLC to Home Assistant. My initial approach was to develop a gateway which connect the PLC over RESTful API. After a couple of integration for projects, I found that it would be beneficial to the community to have a custom integration in HA for OPC UA servers.
 
 I found an older project which uses the python-opcua, which is deprecated and decided to start a new integration using opcua-asyncio.
 
-[![Buy me a beer](https://img.shields.io/badge/Donate-Buy%20me%20a%20beer-yellow?logo=buy-me-a-coffee)](https://buymeacoffee.com/kvsoong)
 
 <br>
 
@@ -23,6 +24,8 @@ I found an older project which uses the python-opcua, which is deprecated and de
 **[`Light`](#light-entities)**
 
 **[`Cover`](#cover-entities)**
+
+**[`Number`](#number-entities)**
 
 **[`Directory`](#-directory-structure)**
 
@@ -266,6 +269,45 @@ This entity allow you to create a cover entity. Paste the following example into
 | `nodeid_cover_set_position` | string | Optional | node id address for the set position of the cover. |
 
 </details>
+
+
+## Number Entities
+
+This entity allows you to create a number entity to read and write numeric values to an OPC UA node. Paste the following example into your `configuration.yaml` file and update the values.
+
+  ```yaml
+  number:
+    - platform: asyncua
+      nodes:
+        - name: "setpoint_temperature"
+          unique_id: "setpoint_temperature"
+          hub: "plc-01"
+          nodeid: "ns=6;s=::Config:SetpointTemperature"
+          unit_of_measurement: "°C"
+          min_value: 15
+          max_value: 30
+          step: 0.5
+          mode: slider
+  ```
+
+<details>
+
+<summary>Options (YAML + descriptions)</summary>
+
+| Name | Type | Requirement | Description |
+| - | - | - | - |
+| `name` | string | **Required** | **Unique** identifier for each number |
+| `unique_id` | string | Optional | Entity ID stored in homeassistant |
+| `hub` | string | **Required** | Corresponded OPCUA hub defined in **[`asyncua-coordinator`](#asyncua-coordinator)** **name** key |
+| `nodeid` | string | **Required** | node id address for the numeric value |
+| `unit_of_measurement` | string | Optional | Unit of measurement to display |
+| `min_value` | float | Optional | Minimum allowed value |
+| `max_value` | float | Optional | Maximum allowed value |
+| `step` | float | Optional | Step increment for the value |
+| `mode` | string | Optional | Display mode: `auto`, `box`, or `slider` (default: `auto`) |
+
+</details>
+
 
 ## Organizing subdirectories for custom sensors and binary_sensor
 
