@@ -4,31 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.light import LightEntity, ColorMode
+from homeassistant.components.light import ColorMode, LightEntity
 from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import AsyncuaCoordinator
 from .const import (
     CONF_NODE_HUB,
     CONF_NODE_ID,
-    CONF_NODE_ID_LIGHT_ON,
     CONF_NODE_ID_LIGHT_OFF,
+    CONF_NODE_ID_LIGHT_ON,
     CONF_NODE_NAME,
     CONF_NODE_UNIQUE_ID,
     CONF_NODES,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +65,8 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+            msg = f"Asyncua hub {hub_name} not found."
+            raise ConfigEntryError(msg)
         coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
         coordinator.add_sensors(sensors=nodes)
 
@@ -86,7 +89,7 @@ async def async_setup_platform(
 class AsyncuaLight(CoordinatorEntity[AsyncuaCoordinator], LightEntity):
     """OPC UA Light using coordinator cache."""
 
-    _attr_supported_color_modes = {ColorMode.ONOFF}
+    _attr_supported_color_modes: ClassVar[set[ColorMode]] = {ColorMode.ONOFF}
     _attr_color_mode = ColorMode.ONOFF
 
     def __init__(
@@ -130,7 +133,7 @@ class AsyncuaLight(CoordinatorEntity[AsyncuaCoordinator], LightEntity):
             try:
                 await asyncio.wait_for(hub.connect(), timeout=5)
             except Exception as e:
-                _LOGGER.error("Reconnect before write failed: %s", e)
+                _LOGGER.exception("Reconnect before write failed: %s", e)
                 self._attr_available = STATE_UNAVAILABLE
                 self.async_write_ha_state()
                 return
@@ -142,7 +145,7 @@ class AsyncuaLight(CoordinatorEntity[AsyncuaCoordinator], LightEntity):
         try:
             await asyncio.wait_for(hub.set_value(nodeid=nodeid, value=value), timeout=5)
         except Exception as e:
-            _LOGGER.error("Write failed for node %s: %s", nodeid, e)
+            _LOGGER.exception("Write failed for node %s: %s", nodeid, e)
             asyncio.create_task(hub.schedule_reconnect())
             self._attr_available = STATE_UNAVAILABLE
             self.async_write_ha_state()

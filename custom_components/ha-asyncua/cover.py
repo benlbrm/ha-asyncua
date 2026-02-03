@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
@@ -17,8 +17,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import AsyncuaCoordinator
@@ -34,6 +32,10 @@ from .const import (
     CONF_NODES,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,7 +73,8 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+            msg = f"Asyncua hub {hub_name} not found."
+            raise ConfigEntryError(msg)
         coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
         coordinator.add_sensors(sensors=nodes)
 
@@ -161,7 +164,7 @@ class AsyncuaCover(CoordinatorEntity[AsyncuaCoordinator], CoverEntity):
         # Si on n'a pas encore de position connue, on retourne la dernière valeur connue
         return self._attr_is_closed
 
-    async def _write_and_refresh(self, nodeid: str, value: Any):
+    async def _write_and_refresh(self, nodeid: str, value: Any) -> None:
         """Write a value and refresh state safely."""
         hub = self.coordinator.hub
         if not hub.connected:
@@ -169,7 +172,7 @@ class AsyncuaCover(CoordinatorEntity[AsyncuaCoordinator], CoverEntity):
             try:
                 await asyncio.wait_for(hub.connect(), timeout=5)
             except Exception as ex:
-                _LOGGER.error("Reconnection failed before write: %s", ex)
+                _LOGGER.exception("Reconnection failed before write: %s", ex)
                 self._attr_available = STATE_UNAVAILABLE
                 self.async_write_ha_state()
                 return
@@ -178,7 +181,7 @@ class AsyncuaCover(CoordinatorEntity[AsyncuaCoordinator], CoverEntity):
             await asyncio.wait_for(hub.set_value(nodeid=nodeid, value=value), timeout=5)
             _LOGGER.debug("Write to node %s succeeded", nodeid)
         except Exception as ex:
-            _LOGGER.error("Write to node %s failed: %s", nodeid, ex)
+            _LOGGER.exception("Write to node %s failed: %s", nodeid, ex)
             await hub.schedule_reconnect()
             self._attr_available = STATE_UNAVAILABLE
             self.async_write_ha_state()
@@ -220,7 +223,7 @@ class AsyncuaCover(CoordinatorEntity[AsyncuaCoordinator], CoverEntity):
         try:
             position = max(0, min(100, int(position)))
         except (ValueError, TypeError):
-            _LOGGER.error("Invalid position value for %s: %s", self.name, position)
+            _LOGGER.exception("Invalid position value for %s: %s", self.name, position)
             return
         await self._write_and_refresh(self._node_id_set_position, position)
 

@@ -10,19 +10,18 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from asyncua import Client, ua
 from asyncua.common import ua_utils
-from asyncua.ua.uaerrors import UaError
 from asyncua.ua.uatypes import DataValue
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
@@ -41,7 +40,9 @@ from .const import (
     SERVICE_SET_VALUE,
 )
 
-# logging.getLogger("asyncua").setLevel(logging.WARNING)
+if TYPE_CHECKING:
+    from homeassistant.helpers.typing import ConfigType
+
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
 
@@ -76,7 +77,7 @@ CONFIG_SCHEMA = vol.Schema(
 class AsyncuaSubscriptionHandler:
     """Handle subscription events from OPC UA server."""
 
-    def __init__(self, hub: "OpcuaHub"):
+    def __init__(self, hub: OpcuaHub) -> None:
         self.hub = hub
 
     async def datachange_notification(self, node, val, data) -> None:
@@ -101,12 +102,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up the ha-asyncua integration and hubs from YAML config."""
     hass.data.setdefault(DOMAIN, {})
 
-    async def _set_value(service):
+    async def _set_value(service) -> bool:
         """Service handler to set a node value."""
         hub_id = service.data[ATTR_NODE_HUB]
         hub_coordinator = hass.data[DOMAIN].get(hub_id)
         if not hub_coordinator:
-            raise ConfigEntryError(f"Hub {hub_id} not found")
+            msg = f"Hub {hub_id} not found"
+            raise ConfigEntryError(msg)
         hub = hub_coordinator.hub
         await hub.set_value(
             nodeid=service.data[ATTR_NODE_ID], value=service.data[ATTR_VALUE]
@@ -116,7 +118,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def _configure_hub(hub_conf: dict[str, Any]) -> None:
         hub_id = hub_conf[CONF_HUB_ID]
         if hub_id in hass.data[DOMAIN]:
-            raise ConfigEntryError(f"Duplicated hub ID {hub_id}")
+            msg = f"Duplicated hub ID {hub_id}"
+            raise ConfigEntryError(msg)
 
         opcua_hub = OpcuaHub(
             hub_name=hub_id,
@@ -135,7 +138,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
         # ensure clean disconnect at shutdown
         @callback
-        async def _async_stop(_event):
+        async def _async_stop(_event) -> None:
             await opcua_hub.shutdown()
 
         hass.bus.async_listen_once("homeassistant_stop", _async_stop)
@@ -206,7 +209,8 @@ class OpcuaHub:
         return self._connected
 
     async def connect(self) -> None:
-        """Establish a connection to the OPC UA server.
+        """
+        Establish a connection to the OPC UA server.
 
         This method is idempotent and uses a lock to avoid concurrent connects.
         It resets backoff on success and clears stale cache.
@@ -229,7 +233,7 @@ class OpcuaHub:
                 raise
             except Exception as exc:
                 self._connected = False
-                _LOGGER.error("Failed to connect to %s: %s", self._hub_url, exc)
+                _LOGGER.exception("Failed to connect to %s: %s", self._hub_url, exc)
                 # schedule reconnect loop if not already scheduled
                 await self.schedule_reconnect()
 
@@ -389,7 +393,7 @@ class OpcuaHub:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _LOGGER.error("Write failed to %s: %s", nodeid, exc)
+            _LOGGER.exception("Write failed to %s: %s", nodeid, exc)
             # schedule reconnect/resubscribe
             asyncio.create_task(self.schedule_reconnect())
             return False
@@ -422,10 +426,8 @@ class OpcuaHub:
                 await asyncio.sleep(backoff)
                 try:
                     # if previous client objects are in weird state, try a graceful disconnect first
-                    try:
+                    with contextlib.suppress(Exception):
                         await self.disconnect()
-                    except Exception:
-                        pass
                     await self.connect()
                     if self._connected:
                         _LOGGER.info(
@@ -459,10 +461,8 @@ class OpcuaHub:
         # cancel reconnect task
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
-            try:
+            with contextlib.suppress(Exception):
                 await self._reconnect_task
-            except Exception:
-                pass
         # disconnect client
         try:
             await self.disconnect()

@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import AsyncuaCoordinator
@@ -28,6 +26,10 @@ from .const import (
     CONF_NODES,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +66,8 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+            msg = f"Asyncua hub {hub_name} not found."
+            raise ConfigEntryError(msg)
         coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
         coordinator.add_sensors(sensors=nodes)
 

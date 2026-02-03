@@ -4,18 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryError
 from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import AsyncuaCoordinator
@@ -32,6 +29,11 @@ from .const import (
     CONF_NODES,
     DOMAIN,
 )
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,7 +71,8 @@ async def async_setup_platform(
 
     for hub_name, nodes in coordinator_nodes.items():
         if hub_name not in hass.data[DOMAIN]:
-            raise ConfigEntryError(f"Asyncua hub {hub_name} not found.")
+            msg = f"Asyncua hub {hub_name} not found."
+            raise ConfigEntryError(msg)
         coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
         coordinator.add_sensors(sensors=nodes)
 
@@ -157,11 +160,13 @@ class AsyncuaNumber(CoordinatorEntity[AsyncuaCoordinator], NumberEntity):
 
         # Ensure connection
         if not hub.connected:
-            _LOGGER.debug("Hub disconnected, attempting reconnect before writing number")
+            _LOGGER.debug(
+                "Hub disconnected, attempting reconnect before writing number"
+            )
             try:
                 await asyncio.wait_for(hub.connect(), timeout=5)
             except Exception as e:
-                _LOGGER.error("Reconnect before write failed: %s", e)
+                _LOGGER.exception("Reconnect before write failed: %s", e)
                 self._attr_available = STATE_UNAVAILABLE
                 self.async_write_ha_state()
                 return
@@ -176,7 +181,7 @@ class AsyncuaNumber(CoordinatorEntity[AsyncuaCoordinator], NumberEntity):
                 hub.set_value(nodeid=self._node_id, value=value), timeout=5
             )
         except Exception as e:
-            _LOGGER.error("Write failed for %s: %s", self._attr_name, e)
+            _LOGGER.exception("Write failed for %s: %s", self._attr_name, e)
             asyncio.create_task(hub.schedule_reconnect())
             self._attr_available = STATE_UNAVAILABLE
             self.async_write_ha_state()
