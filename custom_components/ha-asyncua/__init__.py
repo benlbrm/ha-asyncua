@@ -81,19 +81,43 @@ class AsyncuaSubscriptionHandler:
         self.hub = hub
 
     async def datachange_notification(self, node, val, data) -> None:
-        """Called when a subscribed node value changes."""
-        nodeid = node.nodeid.to_string()
-        self.hub.cache_val[nodeid] = val
-        _LOGGER.debug("DataChange: %s = %s", nodeid, val)
-        await self.hub.notify_update()
+        """Handle data change notification from subscription."""
+        try:
+            nodeid = node.nodeid.to_string()
+            self.hub.cache_val[nodeid] = val
+            _LOGGER.debug("DataChange: %s = %s", nodeid, val)
+            await self.hub.notify_update()
+        except Exception as e:
+            _LOGGER.warning("Error in datachange_notification: %s", e)
+            # Check if this indicates a subscription problem
+            if "BadNoSubscription" in str(e) or "BadSession" in str(e):
+                await self.status_change_notification(e)
 
     async def event_notification(self, event) -> None:
         """Handle event notifications (not used widely here)."""
         _LOGGER.debug("Event: %s", event)
 
     async def status_change_notification(self, status) -> None:
-        """Handle subscription status changes (e.g., BadSessionClosed)."""
-        _LOGGER.warning("Subscription status changed: %s", status)
+        """Handle subscription status changes (e.g., BadSessionClosed, BadNoSubscription)."""
+        status_str = str(status)
+        _LOGGER.warning("Subscription status changed: %s", status_str)
+
+        # Check for subscription-invalidating errors
+        if any(
+            err in status_str
+            for err in (
+                "BadNoSubscription",
+                "BadSessionClosed",
+                "BadSessionIdInvalid",
+                "BadSubscriptionIdInvalid",
+                "BadConnectionClosed",
+            )
+        ):
+            _LOGGER.warning("Subscription invalidated, forcing full reconnect")
+            # Mark subscription as invalid immediately
+            self.hub._subscription = None
+            self.hub._connected = False
+
         # Trigger hub to handle it (disconnect -> reconnect -> resubscribe)
         asyncio.create_task(self.hub.handle_subscription_status_change(status))
 
@@ -401,12 +425,41 @@ class OpcuaHub:
     async def handle_subscription_status_change(self, status: Any) -> None:
         """Called by subscription handler on status change — force full reconnect/resubscribe."""
         _LOGGER.warning("Handling subscription status change: %s", status)
-        # try to disconnect cleanly and start reconnect loop
+
+        # Force disconnect and recreate client to clear stale state
         try:
-            await self.disconnect()
+            await self._force_full_disconnect()
         except Exception as e:
-            _LOGGER.debug("Disconnect during status change handler failed: %s", e)
+            _LOGGER.debug("Force disconnect during status change handler failed: %s", e)
+
         await self.schedule_reconnect()
+
+    async def _force_full_disconnect(self) -> None:
+        """Force a complete disconnection and recreate the client."""
+        async with self._lock:
+            # Clear subscription reference
+            self._subscription = None
+
+            # Try to disconnect gracefully
+            if self.client:
+                try:
+                    await asyncio.wait_for(self.client.disconnect(), timeout=3)
+                except Exception as e:
+                    _LOGGER.debug("Error during forced disconnect: %s", e)
+
+            # Mark as disconnected
+            self._connected = False
+
+            # Recreate the client to clear any stale internal state
+            self.client = Client(url=self._hub_url, timeout=int(self._timeout))
+            self.client.secure_channel_timeout = 60000
+            self.client.session_timeout = 60000
+            if self._username:
+                self.client.set_user(username=self._username)
+            if self._password:
+                self.client.set_password(pwd=self._password)
+
+            _LOGGER.info("Client recreated for hub %s", self._hub_name)
 
     async def schedule_reconnect(self) -> None:
         """Start a reconnect loop with exponential backoff (non-blocking)."""
@@ -425,9 +478,9 @@ class OpcuaHub:
                 )
                 await asyncio.sleep(backoff)
                 try:
-                    # if previous client objects are in weird state, try a graceful disconnect first
+                    # Force full disconnect and recreate client to clear stale state
                     with contextlib.suppress(Exception):
-                        await self.disconnect()
+                        await self._force_full_disconnect()
                     await self.connect()
                     if self._connected:
                         _LOGGER.info(
