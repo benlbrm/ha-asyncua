@@ -218,6 +218,7 @@ class OpcuaHub:
         self._subscription = None
         self._lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._coordinator: AsyncuaCoordinator | None = None
         self._backoff = 5
         self._shutdown = False
@@ -396,6 +397,7 @@ class OpcuaHub:
                 )
 
         _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
+        self._start_watchdog()
 
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Write a value to a node, with safety: connect first, timeout, and reconnect on failure."""
@@ -461,6 +463,55 @@ class OpcuaHub:
 
             _LOGGER.info("Client recreated for hub %s", self._hub_name)
 
+    async def _watchdog(self) -> None:
+        """Periodically verify the OPC UA connection is alive.
+
+        asyncua handles BadNoSubscription errors from PublishResponse internally
+        at the protocol layer (UASocketProtocol) and does not always call
+        status_change_notification on the handler. This watchdog catches that
+        case by actively reading a node value and triggering reconnection if it
+        fails.
+        """
+        while not self._shutdown:
+            await asyncio.sleep(30)
+            if self._shutdown:
+                break
+            if not self._connected or not self._subscription:
+                continue
+            if not self._coordinator or not self._coordinator._node_key_pair:
+                continue
+            nodeid = next(iter(self._coordinator._node_key_pair))
+            try:
+                node = self.client.get_node(nodeid)
+                await asyncio.wait_for(node.read_value(), timeout=5)
+                _LOGGER.debug("Watchdog: hub %s is alive", self._hub_name)
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Watchdog detected dead connection for hub %s: %s — forcing reconnect",
+                    self._hub_name,
+                    exc,
+                )
+                self._subscription = None
+                self._connected = False
+                with contextlib.suppress(Exception):
+                    await self._force_full_disconnect()
+                await self.schedule_reconnect()
+
+    def _start_watchdog(self) -> None:
+        """Start the watchdog task (idempotent)."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            return
+        self._watchdog_task = asyncio.create_task(self._watchdog())
+        _LOGGER.debug("Watchdog started for hub %s", self._hub_name)
+
+    def _stop_watchdog(self) -> None:
+        """Cancel the watchdog task if running."""
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            self._watchdog_task = None
+
     async def schedule_reconnect(self) -> None:
         """Start a reconnect loop with exponential backoff (non-blocking)."""
         if self._shutdown:
@@ -511,6 +562,7 @@ class OpcuaHub:
     async def shutdown(self) -> None:
         """Shutdown hub: cancel reconnect task and disconnect client."""
         self._shutdown = True
+        self._stop_watchdog()
         # cancel reconnect task
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
