@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /home/benoit/_code/ha-asyncua remote get-url origin)",
+      "Bash(gh api:*)",
+      "Bash(python3 -m ruff check:*)",
+      "Bash(ruff check:*)",
+      "Bash(uvx ruff check:*)",
+      "Bash(pipx run ruff:*)",
+      "Bash(python3:*)",
+      "Bash(/tmp/ruff-venv/bin/pip install:*)",
+      "Bash(/tmp/ruff-venv/bin/ruff check:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(/tmp/ruff-venv/bin/ruff format:*)"
+    ]
+  }
+}
