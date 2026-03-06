@@ -45,11 +45,19 @@ if TYPE_CHECKING:
     from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.setLevel(logging.INFO)
 
 # asyncua logs BadNoSubscription from its internal publish loop without calling
 # status_change_notification on the handler — intercept the logger directly.
 _ASYNCUA_PROTOCOL_LOGGER = "asyncua.client.ua_client.UASocketProtocol"
+
+# OPC UA error codes that indicate the subscription/session is no longer valid.
+_SUBSCRIPTION_INVALIDATING_ERRORS = frozenset((
+    "BadNoSubscription",
+    "BadSessionClosed",
+    "BadSessionIdInvalid",
+    "BadSubscriptionIdInvalid",
+    "BadConnectionClosed",
+))
 
 
 class _BadNoSubscriptionLogHandler(logging.Handler):
@@ -122,7 +130,6 @@ class AsyncuaSubscriptionHandler:
         try:
             nodeid = node.nodeid.to_string()
             self.hub.cache_val[nodeid] = val
-            self.hub._last_datachange = asyncio.get_event_loop().time()
             _LOGGER.debug("DataChange: %s = %s", nodeid, val)
             await self.hub.notify_update()
         except Exception as e:
@@ -140,16 +147,7 @@ class AsyncuaSubscriptionHandler:
         _LOGGER.warning("Subscription status changed: %s", status_str)
 
         # Check for subscription-invalidating errors
-        if any(
-            err in status_str
-            for err in (
-                "BadNoSubscription",
-                "BadSessionClosed",
-                "BadSessionIdInvalid",
-                "BadSubscriptionIdInvalid",
-                "BadConnectionClosed",
-            )
-        ):
+        if any(err in status_str for err in _SUBSCRIPTION_INVALIDATING_ERRORS):
             _LOGGER.warning("Subscription invalidated, forcing full reconnect")
             # Mark subscription as invalid immediately
             self.hub._subscription = None
@@ -242,25 +240,27 @@ class OpcuaHub:
         self.device_info = DeviceInfo(
             configuration_url=hub_url, manufacturer=hub_manufacturer, model=hub_model
         )
-        self.client = Client(url=hub_url, timeout=int(timeout))
-        # tune timeouts
-        self.client.secure_channel_timeout = 60000
-        self.client.session_timeout = 60000
-        if username:
-            self.client.set_user(username=username)
-        if password:
-            self.client.set_password(pwd=password)
+        self.client = self._make_client()
 
         self.cache_val: dict[str, Any] = {}
         self._subscription = None
         self._lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
-        self._watchdog_task: asyncio.Task | None = None
         self._log_handler: _BadNoSubscriptionLogHandler | None = None
-        self._last_datachange: float = 0.0
         self._coordinator: AsyncuaCoordinator | None = None
         self._backoff = 5
         self._shutdown = False
+
+    def _make_client(self) -> Client:
+        """Create and configure a fresh asyncua Client."""
+        client = Client(url=self._hub_url, timeout=int(self._timeout))
+        client.secure_channel_timeout = 60000
+        client.session_timeout = 60000
+        if self._username:
+            client.set_user(username=self._username)
+        if self._password:
+            client.set_password(pwd=self._password)
+        return client
 
     @property
     def hub_name(self) -> str:
@@ -362,15 +362,10 @@ class OpcuaHub:
                 "First subscription creation failed, attempting defensive reconnect (hub=%s)",
                 self._hub_name,
             )
-            try:
+            with contextlib.suppress(Exception):
                 await self.disconnect()
-            except Exception:
-                _LOGGER.debug("Disconnect during recovery failed", exc_info=True)
-
-            try:
+            with contextlib.suppress(Exception):
                 await self.connect()
-            except Exception:
-                _LOGGER.debug("Reconnect attempt failed", exc_info=True)
 
             created = await _create_subscription()
             if not created:
@@ -436,10 +431,7 @@ class OpcuaHub:
                 )
 
         _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
-        # Reset silence timer so watchdog doesn't immediately fire on fresh subscription
-        self._last_datachange = asyncio.get_event_loop().time()
         self._register_log_handler()
-        self._start_watchdog()
 
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Write a value to a node, with safety: connect first, timeout, and reconnect on failure."""
@@ -462,8 +454,7 @@ class OpcuaHub:
             raise
         except Exception as exc:
             _LOGGER.exception("Write failed to %s: %s", nodeid, exc)
-            # schedule reconnect/resubscribe
-            asyncio.create_task(self.schedule_reconnect())
+            await self.schedule_reconnect()
             return False
 
     async def handle_subscription_status_change(self, status: Any) -> None:
@@ -482,7 +473,7 @@ class OpcuaHub:
         """Register the asyncua log interceptor (idempotent)."""
         if self._log_handler is not None:
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._log_handler = _BadNoSubscriptionLogHandler(loop=loop, hub=self)
         logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).addHandler(self._log_handler)
         _LOGGER.debug(
@@ -507,85 +498,17 @@ class OpcuaHub:
             self._subscription = None
 
             # Try to disconnect gracefully
-            if self.client:
-                try:
-                    await asyncio.wait_for(self.client.disconnect(), timeout=3)
-                except Exception as e:
-                    _LOGGER.debug("Error during forced disconnect: %s", e)
+            try:
+                await asyncio.wait_for(self.client.disconnect(), timeout=3)
+            except Exception as e:
+                _LOGGER.debug("Error during forced disconnect: %s", e)
 
             # Mark as disconnected
             self._connected = False
 
             # Recreate the client to clear any stale internal state
-            self.client = Client(url=self._hub_url, timeout=int(self._timeout))
-            self.client.secure_channel_timeout = 60000
-            self.client.session_timeout = 60000
-            if self._username:
-                self.client.set_user(username=self._username)
-            if self._password:
-                self.client.set_password(pwd=self._password)
-
+            self.client = self._make_client()
             _LOGGER.info("Client recreated for hub %s", self._hub_name)
-
-    # Watchdog interval and max silence duration (seconds)
-    _WATCHDOG_INTERVAL = 30
-    _WATCHDOG_MAX_SILENCE = 90
-
-    async def _watchdog(self) -> None:
-        """
-        Detect dead subscriptions by tracking datachange silence.
-
-        The log interceptor catches BadNoSubscription immediately, but as a
-        belt-and-suspenders fallback: if no datachange has been received for
-        _WATCHDOG_MAX_SILENCE seconds while connected and subscribed, force a
-        full reconnect.
-
-        Note: read_value() is NOT used here — it succeeds even when the
-        subscription is dead because reads and subscriptions use different
-        OPC UA services.
-        """
-        while not self._shutdown:
-            await asyncio.sleep(self._WATCHDOG_INTERVAL)
-            if self._shutdown:
-                break
-            if not self._connected or not self._subscription:
-                continue
-            if not self._coordinator or not self._coordinator._node_key_pair:
-                continue
-
-            silence = asyncio.get_event_loop().time() - self._last_datachange
-            if silence > self._WATCHDOG_MAX_SILENCE:
-                _LOGGER.warning(
-                    "Watchdog: no datachange for %.0fs on hub %s — subscription likely dead, forcing reconnect",
-                    silence,
-                    self._hub_name,
-                )
-                try:
-                    await self._force_full_disconnect()
-                except asyncio.CancelledError:
-                    return
-                except Exception as exc:
-                    _LOGGER.debug("Watchdog force disconnect failed: %s", exc)
-                await self.schedule_reconnect()
-            else:
-                _LOGGER.debug(
-                    "Watchdog: hub %s alive, last datachange %.0fs ago",
-                    self._hub_name,
-                    silence,
-                )
-
-    def _start_watchdog(self) -> None:
-        """Start the watchdog task (idempotent)."""
-        if self._watchdog_task and not self._watchdog_task.done():
-            return
-        self._watchdog_task = asyncio.create_task(self._watchdog())
-        _LOGGER.debug("Watchdog started for hub %s", self._hub_name)
-
-    def _stop_watchdog(self) -> None:
-        """Cancel the watchdog task if running."""
-        if self._watchdog_task and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
-            self._watchdog_task = None
 
     async def schedule_reconnect(self) -> None:
         """Start a reconnect loop with exponential backoff (non-blocking)."""
@@ -638,7 +561,6 @@ class OpcuaHub:
         """Shutdown hub: cancel reconnect task and disconnect client."""
         self._shutdown = True
         self._unregister_log_handler()
-        self._stop_watchdog()
         # cancel reconnect task
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
@@ -686,24 +608,11 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 )
 
                 # collect all node ids present in the sensor dict (not only the first)
-                expected_keys = {
-                    #     CONF_NODE_ID,
-                    #     CONF_NODE_ID_LIGHT_ON,
-                    #     CONF_NODE_ID_LIGHT_OFF,
-                    #     CONF_NODE_ID_COVER_CLOSE,
-                    #     CONF_NODE_ID_COVER_OPEN,
-                    #     CONF_NODE_ID_COVER_STOP,
-                    #     CONF_NODE_ID_COVER_POSITION,
-                    #     CONF_NODE_ID_COVER_SET_POSITION,
-                }
-
                 for key, value in val.items():
                     if not value:
                         continue
-                    # accept known constant keys or legacy/user keys starting with nodeid_ / node_id_
-                    if key in expected_keys or key.startswith(
-                        (CONF_NODE_ID, "node_id_")
-                    ):
+                    # accept keys starting with nodeid_ / node_id_
+                    if key.startswith((CONF_NODE_ID, "node_id_")):
                         node_id = value
                         if node_id:
                             if node_id not in self._node_key_pair:
