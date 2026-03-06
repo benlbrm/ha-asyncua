@@ -51,13 +51,13 @@ _LOGGER = logging.getLogger(__name__)
 _ASYNCUA_PROTOCOL_LOGGER = "asyncua.client.ua_client.UASocketProtocol"
 
 # OPC UA error codes that indicate the subscription/session is no longer valid.
-_SUBSCRIPTION_INVALIDATING_ERRORS = (
+_SUBSCRIPTION_INVALIDATING_ERRORS = frozenset((
     "BadNoSubscription",
     "BadSessionClosed",
     "BadSessionIdInvalid",
     "BadSubscriptionIdInvalid",
     "BadConnectionClosed",
-)
+))
 
 
 class _BadNoSubscriptionLogHandler(logging.Handler):
