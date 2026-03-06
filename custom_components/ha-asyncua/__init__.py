@@ -51,6 +51,15 @@ _LOGGER.setLevel(logging.INFO)
 # status_change_notification on the handler — intercept the logger directly.
 _ASYNCUA_PROTOCOL_LOGGER = "asyncua.client.ua_client.UASocketProtocol"
 
+# OPC UA error codes that indicate the subscription/session is no longer valid.
+_SUBSCRIPTION_INVALIDATING_ERRORS = (
+    "BadNoSubscription",
+    "BadSessionClosed",
+    "BadSessionIdInvalid",
+    "BadSubscriptionIdInvalid",
+    "BadConnectionClosed",
+)
+
 
 class _BadNoSubscriptionLogHandler(logging.Handler):
     """Detect BadNoSubscription in asyncua internal logs and trigger hub reconnect."""
@@ -139,16 +148,7 @@ class AsyncuaSubscriptionHandler:
         _LOGGER.warning("Subscription status changed: %s", status_str)
 
         # Check for subscription-invalidating errors
-        if any(
-            err in status_str
-            for err in (
-                "BadNoSubscription",
-                "BadSessionClosed",
-                "BadSessionIdInvalid",
-                "BadSubscriptionIdInvalid",
-                "BadConnectionClosed",
-            )
-        ):
+        if any(err in status_str for err in _SUBSCRIPTION_INVALIDATING_ERRORS):
             _LOGGER.warning("Subscription invalidated, forcing full reconnect")
             # Mark subscription as invalid immediately
             self.hub._subscription = None
@@ -241,14 +241,7 @@ class OpcuaHub:
         self.device_info = DeviceInfo(
             configuration_url=hub_url, manufacturer=hub_manufacturer, model=hub_model
         )
-        self.client = Client(url=hub_url, timeout=int(timeout))
-        # tune timeouts
-        self.client.secure_channel_timeout = 60000
-        self.client.session_timeout = 60000
-        if username:
-            self.client.set_user(username=username)
-        if password:
-            self.client.set_password(pwd=password)
+        self.client = self._make_client()
 
         self.cache_val: dict[str, Any] = {}
         self._subscription = None
@@ -258,6 +251,17 @@ class OpcuaHub:
         self._coordinator: AsyncuaCoordinator | None = None
         self._backoff = 5
         self._shutdown = False
+
+    def _make_client(self) -> Client:
+        """Create and configure a fresh asyncua Client."""
+        client = Client(url=self._hub_url, timeout=int(self._timeout))
+        client.secure_channel_timeout = 60000
+        client.session_timeout = 60000
+        if self._username:
+            client.set_user(username=self._username)
+        if self._password:
+            client.set_password(pwd=self._password)
+        return client
 
     @property
     def hub_name(self) -> str:
@@ -476,7 +480,7 @@ class OpcuaHub:
         """Register the asyncua log interceptor (idempotent)."""
         if self._log_handler is not None:
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._log_handler = _BadNoSubscriptionLogHandler(loop=loop, hub=self)
         logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).addHandler(self._log_handler)
         _LOGGER.debug(
@@ -511,14 +515,7 @@ class OpcuaHub:
             self._connected = False
 
             # Recreate the client to clear any stale internal state
-            self.client = Client(url=self._hub_url, timeout=int(self._timeout))
-            self.client.secure_channel_timeout = 60000
-            self.client.session_timeout = 60000
-            if self._username:
-                self.client.set_user(username=self._username)
-            if self._password:
-                self.client.set_password(pwd=self._password)
-
+            self.client = self._make_client()
             _LOGGER.info("Client recreated for hub %s", self._hub_name)
 
     async def schedule_reconnect(self) -> None:
