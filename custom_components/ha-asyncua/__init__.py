@@ -122,7 +122,6 @@ class AsyncuaSubscriptionHandler:
         try:
             nodeid = node.nodeid.to_string()
             self.hub.cache_val[nodeid] = val
-            self.hub._last_datachange = asyncio.get_event_loop().time()
             _LOGGER.debug("DataChange: %s = %s", nodeid, val)
             await self.hub.notify_update()
         except Exception as e:
@@ -255,9 +254,7 @@ class OpcuaHub:
         self._subscription = None
         self._lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
-        self._watchdog_task: asyncio.Task | None = None
         self._log_handler: _BadNoSubscriptionLogHandler | None = None
-        self._last_datachange: float = 0.0
         self._coordinator: AsyncuaCoordinator | None = None
         self._backoff = 5
         self._shutdown = False
@@ -436,10 +433,7 @@ class OpcuaHub:
                 )
 
         _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
-        # Reset silence timer so watchdog doesn't immediately fire on fresh subscription
-        self._last_datachange = asyncio.get_event_loop().time()
         self._register_log_handler()
-        self._start_watchdog()
 
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Write a value to a node, with safety: connect first, timeout, and reconnect on failure."""
@@ -527,66 +521,6 @@ class OpcuaHub:
 
             _LOGGER.info("Client recreated for hub %s", self._hub_name)
 
-    # Watchdog interval and max silence duration (seconds)
-    _WATCHDOG_INTERVAL = 30
-    _WATCHDOG_MAX_SILENCE = 90
-
-    async def _watchdog(self) -> None:
-        """
-        Detect dead subscriptions by tracking datachange silence.
-
-        The log interceptor catches BadNoSubscription immediately, but as a
-        belt-and-suspenders fallback: if no datachange has been received for
-        _WATCHDOG_MAX_SILENCE seconds while connected and subscribed, force a
-        full reconnect.
-
-        Note: read_value() is NOT used here — it succeeds even when the
-        subscription is dead because reads and subscriptions use different
-        OPC UA services.
-        """
-        while not self._shutdown:
-            await asyncio.sleep(self._WATCHDOG_INTERVAL)
-            if self._shutdown:
-                break
-            if not self._connected or not self._subscription:
-                continue
-            if not self._coordinator or not self._coordinator._node_key_pair:
-                continue
-
-            silence = asyncio.get_event_loop().time() - self._last_datachange
-            if silence > self._WATCHDOG_MAX_SILENCE:
-                _LOGGER.warning(
-                    "Watchdog: no datachange for %.0fs on hub %s — subscription likely dead, forcing reconnect",
-                    silence,
-                    self._hub_name,
-                )
-                try:
-                    await self._force_full_disconnect()
-                except asyncio.CancelledError:
-                    return
-                except Exception as exc:
-                    _LOGGER.debug("Watchdog force disconnect failed: %s", exc)
-                await self.schedule_reconnect()
-            else:
-                _LOGGER.debug(
-                    "Watchdog: hub %s alive, last datachange %.0fs ago",
-                    self._hub_name,
-                    silence,
-                )
-
-    def _start_watchdog(self) -> None:
-        """Start the watchdog task (idempotent)."""
-        if self._watchdog_task and not self._watchdog_task.done():
-            return
-        self._watchdog_task = asyncio.create_task(self._watchdog())
-        _LOGGER.debug("Watchdog started for hub %s", self._hub_name)
-
-    def _stop_watchdog(self) -> None:
-        """Cancel the watchdog task if running."""
-        if self._watchdog_task and not self._watchdog_task.done():
-            self._watchdog_task.cancel()
-            self._watchdog_task = None
-
     async def schedule_reconnect(self) -> None:
         """Start a reconnect loop with exponential backoff (non-blocking)."""
         if self._shutdown:
@@ -638,7 +572,6 @@ class OpcuaHub:
         """Shutdown hub: cancel reconnect task and disconnect client."""
         self._shutdown = True
         self._unregister_log_handler()
-        self._stop_watchdog()
         # cancel reconnect task
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
