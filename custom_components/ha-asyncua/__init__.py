@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
@@ -45,6 +46,42 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 _LOGGER.setLevel(logging.INFO)
+
+# asyncua logs BadNoSubscription from its internal publish loop without calling
+# status_change_notification on the handler — intercept the logger directly.
+_ASYNCUA_PROTOCOL_LOGGER = "asyncua.client.ua_client.UASocketProtocol"
+
+
+class _BadNoSubscriptionLogHandler(logging.Handler):
+    """Detect BadNoSubscription in asyncua internal logs and trigger hub reconnect."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, hub: OpcuaHub) -> None:
+        super().__init__(level=logging.WARNING)
+        self._loop = loop
+        self._hub = hub
+        self._triggered = False
+        self._lock = threading.Lock()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "BadNoSubscription" not in record.getMessage():
+            return
+        with self._lock:
+            if self._triggered:
+                return
+            self._triggered = True
+        _LOGGER.warning(
+            "BadNoSubscription detected via log interceptor (hub=%s) — forcing reconnect",
+            self._hub.hub_name,
+        )
+        self._loop.call_soon_threadsafe(
+            self._loop.create_task,
+            self._hub.handle_subscription_status_change("BadNoSubscription"),
+        )
+
+    def reset(self) -> None:
+        """Allow future triggers after a reconnect."""
+        with self._lock:
+            self._triggered = False
 
 
 BASE_SCHEMA = vol.Schema(
@@ -85,11 +122,11 @@ class AsyncuaSubscriptionHandler:
         try:
             nodeid = node.nodeid.to_string()
             self.hub.cache_val[nodeid] = val
+            self.hub._last_datachange = asyncio.get_event_loop().time()
             _LOGGER.debug("DataChange: %s = %s", nodeid, val)
             await self.hub.notify_update()
         except Exception as e:
             _LOGGER.warning("Error in datachange_notification: %s", e)
-            # Check if this indicates a subscription problem
             if "BadNoSubscription" in str(e) or "BadSession" in str(e):
                 await self.status_change_notification(e)
 
@@ -219,6 +256,8 @@ class OpcuaHub:
         self._lock = asyncio.Lock()
         self._reconnect_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._log_handler: _BadNoSubscriptionLogHandler | None = None
+        self._last_datachange: float = 0.0
         self._coordinator: AsyncuaCoordinator | None = None
         self._backoff = 5
         self._shutdown = False
@@ -397,6 +436,9 @@ class OpcuaHub:
                 )
 
         _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
+        # Reset silence timer so watchdog doesn't immediately fire on fresh subscription
+        self._last_datachange = asyncio.get_event_loop().time()
+        self._register_log_handler()
         self._start_watchdog()
 
     async def set_value(self, nodeid: str, value: Any) -> bool:
@@ -436,8 +478,30 @@ class OpcuaHub:
 
         await self.schedule_reconnect()
 
+    def _register_log_handler(self) -> None:
+        """Register the asyncua log interceptor (idempotent)."""
+        if self._log_handler is not None:
+            return
+        loop = asyncio.get_event_loop()
+        self._log_handler = _BadNoSubscriptionLogHandler(loop=loop, hub=self)
+        logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).addHandler(self._log_handler)
+        _LOGGER.debug(
+            "BadNoSubscription log interceptor registered for hub %s", self._hub_name
+        )
+
+    def _unregister_log_handler(self) -> None:
+        """Unregister and reset the asyncua log interceptor."""
+        if self._log_handler is None:
+            return
+        logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).removeHandler(self._log_handler)
+        self._log_handler = None
+        _LOGGER.debug(
+            "BadNoSubscription log interceptor removed for hub %s", self._hub_name
+        )
+
     async def _force_full_disconnect(self) -> None:
         """Force a complete disconnection and recreate the client."""
+        self._unregister_log_handler()
         async with self._lock:
             # Clear subscription reference
             self._subscription = None
@@ -463,41 +527,52 @@ class OpcuaHub:
 
             _LOGGER.info("Client recreated for hub %s", self._hub_name)
 
-    async def _watchdog(self) -> None:
-        """Periodically verify the OPC UA connection is alive.
+    # Watchdog interval and max silence duration (seconds)
+    _WATCHDOG_INTERVAL = 30
+    _WATCHDOG_MAX_SILENCE = 90
 
-        asyncua handles BadNoSubscription errors from PublishResponse internally
-        at the protocol layer (UASocketProtocol) and does not always call
-        status_change_notification on the handler. This watchdog catches that
-        case by actively reading a node value and triggering reconnection if it
-        fails.
+    async def _watchdog(self) -> None:
+        """
+        Detect dead subscriptions by tracking datachange silence.
+
+        The log interceptor catches BadNoSubscription immediately, but as a
+        belt-and-suspenders fallback: if no datachange has been received for
+        _WATCHDOG_MAX_SILENCE seconds while connected and subscribed, force a
+        full reconnect.
+
+        Note: read_value() is NOT used here — it succeeds even when the
+        subscription is dead because reads and subscriptions use different
+        OPC UA services.
         """
         while not self._shutdown:
-            await asyncio.sleep(30)
+            await asyncio.sleep(self._WATCHDOG_INTERVAL)
             if self._shutdown:
                 break
             if not self._connected or not self._subscription:
                 continue
             if not self._coordinator or not self._coordinator._node_key_pair:
                 continue
-            nodeid = next(iter(self._coordinator._node_key_pair))
-            try:
-                node = self.client.get_node(nodeid)
-                await asyncio.wait_for(node.read_value(), timeout=5)
-                _LOGGER.debug("Watchdog: hub %s is alive", self._hub_name)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
+
+            silence = asyncio.get_event_loop().time() - self._last_datachange
+            if silence > self._WATCHDOG_MAX_SILENCE:
                 _LOGGER.warning(
-                    "Watchdog detected dead connection for hub %s: %s — forcing reconnect",
+                    "Watchdog: no datachange for %.0fs on hub %s — subscription likely dead, forcing reconnect",
+                    silence,
                     self._hub_name,
-                    exc,
                 )
-                self._subscription = None
-                self._connected = False
-                with contextlib.suppress(Exception):
+                try:
                     await self._force_full_disconnect()
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    _LOGGER.debug("Watchdog force disconnect failed: %s", exc)
                 await self.schedule_reconnect()
+            else:
+                _LOGGER.debug(
+                    "Watchdog: hub %s alive, last datachange %.0fs ago",
+                    self._hub_name,
+                    silence,
+                )
 
     def _start_watchdog(self) -> None:
         """Start the watchdog task (idempotent)."""
@@ -562,6 +637,7 @@ class OpcuaHub:
     async def shutdown(self) -> None:
         """Shutdown hub: cancel reconnect task and disconnect client."""
         self._shutdown = True
+        self._unregister_log_handler()
         self._stop_watchdog()
         # cancel reconnect task
         if self._reconnect_task and not self._reconnect_task.done():

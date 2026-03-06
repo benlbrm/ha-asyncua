@@ -11,7 +11,11 @@
       "Bash(/tmp/ruff-venv/bin/pip install:*)",
       "Bash(/tmp/ruff-venv/bin/ruff check:*)",
       "WebFetch(domain:github.com)",
-      "Bash(/tmp/ruff-venv/bin/ruff format:*)"
+      "Bash(/tmp/ruff-venv/bin/ruff format:*)",
+      "Bash(/tmp/ruff-venv2/bin/ruff format /home/benoit/_code/ha-asyncua --config /home/benoit/_code/ha-asyncua/.ruff.toml)",
+      "Bash(/tmp/ruff-venv2/bin/ruff check /home/benoit/_code/ha-asyncua --config /home/benoit/_code/ha-asyncua/.ruff.toml)",
+      "Bash(git add -A)",
+      "Bash(git commit -m \"Fix BadNoSubscription: intercept asyncua logger + silence-based watchdog:*)"
     ]
   }
 }
