@@ -362,15 +362,10 @@ class OpcuaHub:
                 "First subscription creation failed, attempting defensive reconnect (hub=%s)",
                 self._hub_name,
             )
-            try:
+            with contextlib.suppress(Exception):
                 await self.disconnect()
-            except Exception:
-                _LOGGER.debug("Disconnect during recovery failed", exc_info=True)
-
-            try:
+            with contextlib.suppress(Exception):
                 await self.connect()
-            except Exception:
-                _LOGGER.debug("Reconnect attempt failed", exc_info=True)
 
             created = await _create_subscription()
             if not created:
@@ -459,8 +454,7 @@ class OpcuaHub:
             raise
         except Exception as exc:
             _LOGGER.exception("Write failed to %s: %s", nodeid, exc)
-            # schedule reconnect/resubscribe
-            asyncio.create_task(self.schedule_reconnect())
+            await self.schedule_reconnect()
             return False
 
     async def handle_subscription_status_change(self, status: Any) -> None:
@@ -504,11 +498,10 @@ class OpcuaHub:
             self._subscription = None
 
             # Try to disconnect gracefully
-            if self.client:
-                try:
-                    await asyncio.wait_for(self.client.disconnect(), timeout=3)
-                except Exception as e:
-                    _LOGGER.debug("Error during forced disconnect: %s", e)
+            try:
+                await asyncio.wait_for(self.client.disconnect(), timeout=3)
+            except Exception as e:
+                _LOGGER.debug("Error during forced disconnect: %s", e)
 
             # Mark as disconnected
             self._connected = False
