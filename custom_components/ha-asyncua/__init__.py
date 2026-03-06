@@ -45,7 +45,6 @@ if TYPE_CHECKING:
     from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.setLevel(logging.INFO)
 
 # asyncua logs BadNoSubscription from its internal publish loop without calling
 # status_change_notification on the handler — intercept the logger directly.
@@ -616,24 +615,11 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
                 )
 
                 # collect all node ids present in the sensor dict (not only the first)
-                expected_keys = {
-                    #     CONF_NODE_ID,
-                    #     CONF_NODE_ID_LIGHT_ON,
-                    #     CONF_NODE_ID_LIGHT_OFF,
-                    #     CONF_NODE_ID_COVER_CLOSE,
-                    #     CONF_NODE_ID_COVER_OPEN,
-                    #     CONF_NODE_ID_COVER_STOP,
-                    #     CONF_NODE_ID_COVER_POSITION,
-                    #     CONF_NODE_ID_COVER_SET_POSITION,
-                }
-
                 for key, value in val.items():
                     if not value:
                         continue
-                    # accept known constant keys or legacy/user keys starting with nodeid_ / node_id_
-                    if key in expected_keys or key.startswith(
-                        (CONF_NODE_ID, "node_id_")
-                    ):
+                    # accept keys starting with nodeid_ / node_id_
+                    if key.startswith((CONF_NODE_ID, "node_id_")):
                         node_id = value
                         if node_id:
                             if node_id not in self._node_key_pair:
