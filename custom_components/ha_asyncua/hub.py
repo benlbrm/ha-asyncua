@@ -36,6 +36,24 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# asyncua logs every publish/monitored item at INFO, which floods the Home
+# Assistant log. Quiet these loggers unless the user configured asyncua levels.
+_NOISY_ASYNCUA_LOGGERS = (
+    "asyncua.common.subscription",
+    "asyncua.client.ua_session",
+    "asyncua.client.ua_client.UASocketProtocol",
+)
+
+
+def _quiet_asyncua_logs() -> None:
+    if logging.getLogger("asyncua").level != logging.NOTSET:
+        return
+    for name in _NOISY_ASYNCUA_LOGGERS:
+        logger = logging.getLogger(name)
+        if logger.level == logging.NOTSET:
+            logger.setLevel(logging.WARNING)
+
+
 CONNECT_TIMEOUT = 10
 REQUEST_TIMEOUT = 5
 INITIAL_BACKOFF = 5
@@ -175,6 +193,7 @@ class OpcuaHub:
     """
 
     def __init__(self, hass: HomeAssistant, config: HubConfig) -> None:
+        _quiet_asyncua_logs()
         self.hass = hass
         self.config = config
         self.client = self._make_client()

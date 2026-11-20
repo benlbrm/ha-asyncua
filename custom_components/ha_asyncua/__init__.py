@@ -411,12 +411,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
     entry.runtime_data = runtime
     await async_adopt_old_entry(hass, entry)
 
-    dr.async_get(hass).async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, hub.name)},
-        name=hub.name,
-        manufacturer=hub.config.manufacturer or None,
-        model=hub.config.model or None,
+    runtime.hub_device_id = (
+        dr.async_get(hass)
+        .async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, hub.name)},
+            name=hub.name,
+            manufacturer=hub.config.manufacturer or None,
+            model=hub.config.model or None,
+        )
+        .id
     )
 
     if entry.options.get(CONF_DISCOVERY_ENABLED, False):

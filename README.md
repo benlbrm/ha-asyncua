@@ -267,20 +267,30 @@ logger:
 
 Home Assistant does not accept `-` in an integration domain (brand icon, hassfest, HACS validation), so the domain is now **`ha_asyncua`** (the repository keeps its name).
 
-- **Automatic**: entities, devices and UI hubs are migrated at startup. Entity ids, names, customisations and history are kept.
-- **YAML**: replace `ha-asyncua` with `ha_asyncua` in `configuration.yaml` and the included files:
+### How to upgrade
 
-  ```yaml
-  ha_asyncua:                 # was ha-asyncua:
-    - name: "plc-01"
-      ...
-  sensor:
-    - platform: ha_asyncua    # was platform: ha-asyncua
-  ```
+The store (HACS / Marketplace) refuses to update an integration whose domain changed (*"changed its domain from ha-asyncua to ha_asyncua, uninstall it and install it again"*). Uninstalling only deletes `custom_components/ha-asyncua`: config entries, entities, devices, history and certificates (`/config/ha-asyncua/`) are kept.
 
-  Until then the old YAML still works, Home Assistant logs that `ha-asyncua` is not found and a repair issue lists what to rename.
-- Services are now `ha_asyncua.set_value` / `ha_asyncua.rediscover`; logger `custom_components.ha_asyncua`.
-- Auto-generated certificates stay in `/config/ha-asyncua/<hub>/`, so a certificate already trusted by the PLC keeps working.
+1. In the store, **uninstall** *OPC UA (asyncua)*. Do not restart yet.
+2. **Install** it again (new version).
+3. In `configuration.yaml` and the included files, replace `ha-asyncua` with `ha_asyncua`:
+
+   ```yaml
+   ha_asyncua:                 # was ha-asyncua:
+     - name: "plc-01"
+       ...
+   sensor:
+     - platform: ha_asyncua    # was platform: ha-asyncua
+   ```
+
+   Also update automations / scripts calling the services: `ha_asyncua.set_value`, `ha_asyncua.rediscover`, and the logger name `custom_components.ha_asyncua`.
+4. **Restart** Home Assistant once.
+
+At startup the integration migrates entities, devices and UI hubs from the old domain: entity ids, names, customisations and history are kept, and the old entries are removed.
+
+If you skip step 3, the old YAML still works: Home Assistant logs that `ha-asyncua` is not found and a repair issue lists what to rename.
+
+Auto-generated certificates stay in `/config/ha-asyncua/<hub>/` (same client application URI), so a certificate already trusted by the PLC keeps working.
 
 ## Upgrading from 0.1.x
 
