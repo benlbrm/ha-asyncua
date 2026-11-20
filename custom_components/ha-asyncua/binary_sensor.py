@@ -124,5 +124,6 @@ class AsyncuaBinarySensor(CoordinatorEntity[AsyncuaCoordinator], BinarySensorEnt
         return self._attr_is_on
 
     async def async_added_to_hass(self) -> None:
-        """Request coordinator refresh when added."""
+        """Register coordinator listener and request refresh when added."""
+        await super().async_added_to_hass()
         await self.coordinator.async_request_refresh()
