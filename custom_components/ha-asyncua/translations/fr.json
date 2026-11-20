@@ -1,0 +1,144 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Serveur OPC UA",
+        "description": "Connexion à un serveur OPC UA (automate).",
+        "data": {
+          "name": "Nom (identifiant unique du hub)",
+          "url": "URL du serveur",
+          "username": "Utilisateur",
+          "password": "Mot de passe",
+          "security_policy": "Politique de sécurité",
+          "security_mode": "Mode de sécurité",
+          "publishing_interval": "Intervalle de publication (ms)",
+          "manufacturer": "Fabricant",
+          "model": "Modèle"
+        },
+        "data_description": {
+          "security_policy": "Avec une politique autre que None, un certificat client est créé dans {certificate} : il doit être approuvé sur le serveur (automate) avant que la connexion réussisse."
+        }
+      },
+      "reconfigure": {
+        "title": "Serveur OPC UA",
+        "data": {
+          "url": "URL du serveur",
+          "username": "Utilisateur",
+          "password": "Mot de passe",
+          "security_policy": "Politique de sécurité",
+          "security_mode": "Mode de sécurité",
+          "publishing_interval": "Intervalle de publication (ms)",
+          "manufacturer": "Fabricant",
+          "model": "Modèle"
+        },
+        "data_description": {
+          "security_policy": "Avec une politique autre que None, un certificat client est créé dans {certificate} : il doit être approuvé sur le serveur (automate) avant que la connexion réussisse."
+        }
+      },
+      "discovery": {
+        "title": "Découverte",
+        "description": "Choisir les variables créées comme entités. Modifiable ensuite dans les options de l'intégration.",
+        "data": {
+          "discovery_enabled": "Découvrir les variables automatiquement",
+          "discovery_root": "Node racine à parcourir",
+          "discovery_max_depth": "Profondeur maximale",
+          "discovery_include": "Inclure (regex sur le chemin ou le node id)",
+          "discovery_exclude": "Exclure (regex sur le chemin ou le node id)",
+          "discovery_namespaces": "Namespaces (index séparés par des virgules, vide = tous)",
+          "discovery_writable": "Variables pilotables (regex)"
+        },
+        "data_description": {
+          "discovery_root": "i=85 est le dossier Objects.",
+          "discovery_include": "Exemple : `Global PV|Heaters`",
+          "discovery_exclude": "Exemple : `TON_|_old$` pour masquer l'intérieur des function blocks.",
+          "discovery_namespaces": "Les serveurs exposent souvent les mêmes variables dans plusieurs namespaces (ex. B&R ns=6 et PLCopen ns=7) : n'en garder qu'un.",
+          "discovery_writable": "Les variables écrivables qui correspondent à cette regex deviennent des switch / number / text. Toutes les autres sont en lecture seule. Vide = rien n'est écrivable depuis Home Assistant."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Connexion au serveur impossible. {details}",
+      "invalid_auth": "Utilisateur ou mot de passe invalide.",
+      "security_error": "Le serveur a refusé la connexion sécurisée (le certificat client est-il approuvé sur l'automate ?).",
+      "invalid_nodeid": "Node id invalide (exemple : i=85 ou ns=6;s=::AsGlobalPV).",
+      "invalid_regex": "Expression régulière invalide.",
+      "invalid_namespaces": "Utiliser des nombres séparés par des virgules, ex. 2,6."
+    },
+    "abort": {
+      "already_configured": "Ce hub est déjà configuré.",
+      "reconfigure_successful": "Reconfiguration réussie.",
+      "yaml_managed": "Ce hub est défini dans configuration.yaml : le modifier là-bas."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Découverte",
+        "description": "Namespaces du serveur : {namespaces}",
+        "data": {
+          "discovery_enabled": "Découvrir les variables automatiquement",
+          "discovery_root": "Node racine à parcourir",
+          "discovery_max_depth": "Profondeur maximale",
+          "discovery_include": "Inclure (regex sur le chemin ou le node id)",
+          "discovery_exclude": "Exclure (regex sur le chemin ou le node id)",
+          "discovery_namespaces": "Namespaces (index séparés par des virgules, vide = tous)",
+          "discovery_writable": "Variables pilotables (regex)"
+        },
+        "data_description": {
+          "discovery_root": "i=85 est le dossier Objects.",
+          "discovery_include": "Exemple : `Global PV|Heaters`",
+          "discovery_exclude": "Exemple : `TON_|_old$` pour masquer l'intérieur des function blocks.",
+          "discovery_namespaces": "Les serveurs exposent souvent les mêmes variables dans plusieurs namespaces (ex. B&R ns=6 et PLCopen ns=7) : n'en garder qu'un.",
+          "discovery_writable": "Les variables écrivables qui correspondent à cette regex deviennent des switch / number / text. Toutes les autres sont en lecture seule. Vide = rien n'est écrivable depuis Home Assistant."
+        }
+      }
+    },
+    "error": {
+      "invalid_nodeid": "Node id invalide (exemple : i=85 ou ns=6;s=::AsGlobalPV).",
+      "invalid_regex": "Expression régulière invalide.",
+      "invalid_namespaces": "Utiliser des nombres séparés par des virgules, ex. 2,6."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connecté"
+      }
+    },
+    "button": {
+      "rediscover": {
+        "name": "Redécouvrir les variables"
+      }
+    }
+  },
+  "services": {
+    "set_value": {
+      "name": "Écrire une valeur",
+      "description": "Écrit une valeur dans un node OPC UA.",
+      "fields": {
+        "hub": {
+          "name": "Hub",
+          "description": "Nom du hub OPC UA."
+        },
+        "nodeid": {
+          "name": "Node id",
+          "description": "Node à écrire, ex. ns=6;s=::AsGlobalPV:consigne."
+        },
+        "value": {
+          "name": "Valeur",
+          "description": "Valeur, convertie dans le type du node."
+        }
+      }
+    },
+    "rediscover": {
+      "name": "Redécouvrir",
+      "description": "Parcourt de nouveau le serveur et met à jour les entités découvertes.",
+      "fields": {
+        "hub": {
+          "name": "Hub",
+          "description": "Nom du hub OPC UA."
+        }
+      }
+    }
+  }
+}
