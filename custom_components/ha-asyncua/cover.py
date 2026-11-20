@@ -127,7 +127,7 @@ class AsyncuaCover(AsyncuaEntity, CoverEntity):
         value = self.raw_value
         try:
             position = None if value is None else max(0, min(100, int(value)))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             position = None
         self._attr_current_cover_position = position
         self._attr_is_closed = None if position is None else position == 0

@@ -1,7 +1,6 @@
 colorlog==6.9.0
-homeassistant==2026.10.4
+homeassistant==2026.11.2
 pip>=26.0.1
 ruff==0.17.6
 asyncua==2.1.0
 go2rtc-client
-pytest-homeassistant-custom-component==0.13.375

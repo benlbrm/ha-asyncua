@@ -158,7 +158,7 @@ class AsyncuaNumber(AsyncuaEntity, NumberEntity):
         value = self.raw_value
         try:
             self._attr_native_value = None if value is None else float(value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             self._attr_native_value = None
 
     async def async_set_native_value(self, value: float) -> None:

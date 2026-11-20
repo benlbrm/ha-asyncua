@@ -5,3 +5,6 @@ set -e
 cd "$(dirname "$0")/.."
 
 python3 -m pip install --requirement requirements.txt
+
+# Test dependencies (pin their own Home Assistant version): use a separate venv.
+# python3 -m pip install --requirement requirements_test.txt

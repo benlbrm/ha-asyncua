@@ -276,7 +276,8 @@ logger:
 ## Development
 
 ```bash
-scripts/setup     # install requirements
+scripts/setup     # install requirements (Home Assistant 2026.11.2, Python >= 3.14.2)
+pip install -r requirements_test.txt  # test deps, in a separate venv: the HA test plugin pins its own HA version
 scripts/test      # run the test-suite (embedded OPC UA server, no PLC needed)
 scripts/lint      # ruff format + check
 scripts/develop   # start Home Assistant with ./config
