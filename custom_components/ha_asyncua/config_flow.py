@@ -1,4 +1,4 @@
-"""Config flow for ha-asyncua."""
+"""Config flow for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from .const import (
     SECURITY_POLICIES,
     SECURITY_POLICY_NONE,
 )
-from .hub import OpcuaHub
+from .hub import OpcuaHub, without_unused_security
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -225,7 +225,7 @@ class AsyncuaConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             error, details = await self._async_test_connection(user_input)
             if error is None:
-                self._data = user_input
+                self._data = without_unused_security(user_input)
                 return await self.async_step_discovery()
             errors["base"] = error
         defaults = user_input or {}
@@ -260,6 +260,18 @@ class AsyncuaConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_migrate(
+        self, migrate_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Re-create a UI hub of the former ``ha-asyncua`` domain."""
+        await self.async_set_unique_id(migrate_data["unique_id"])
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=migrate_data["title"],
+            data=without_unused_security(migrate_data["data"]),
+            options=migrate_data["options"],
+        )
+
     async def async_step_import(self, import_data: dict[str, Any]) -> ConfigFlowResult:
         """Import a hub defined in configuration.yaml (YAML stays the source of truth)."""
         await self.async_set_unique_id(import_data[CONF_HUB_ID])
@@ -290,7 +302,9 @@ class AsyncuaConfigFlow(ConfigFlow, domain=DOMAIN):
                     data.pop(key, None)
             error, details = await self._async_test_connection(data)
             if error is None:
-                return self.async_update_reload_and_abort(entry, data=data)
+                return self.async_update_reload_and_abort(
+                    entry, data=without_unused_security(data)
+                )
             errors["base"] = error
         return self.async_show_form(
             step_id="reconfigure",

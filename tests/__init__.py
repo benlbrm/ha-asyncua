@@ -1,1 +1,1 @@
-"""Tests for ha-asyncua."""
+"""Tests for ha_asyncua."""

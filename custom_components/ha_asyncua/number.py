@@ -1,4 +1,4 @@
-"""Number platform for ha-asyncua."""
+"""Number platform for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -93,7 +93,14 @@ async def async_setup_platform(
             mode=conf.get("mode", conf.get(CONF_NODE_ID_NUMBER_MODE, NumberMode.AUTO)),
         )
 
-    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
+    await async_setup_yaml_platform(
+        hass,
+        config,
+        async_add_entities,
+        _factory,
+        discovery_info=discovery_info,
+        schema=PLATFORM_SCHEMA,
+    )
 
 
 async def async_setup_entry(

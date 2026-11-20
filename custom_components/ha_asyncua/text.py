@@ -1,4 +1,4 @@
-"""Text platform for ha-asyncua (discovered writable strings)."""
+"""Text platform for ha_asyncua (discovered writable strings)."""
 
 from __future__ import annotations
 

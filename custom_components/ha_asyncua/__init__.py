@@ -1,5 +1,5 @@
 """
-ha-asyncua: connect OPC UA servers (PLCs) to Home Assistant.
+ha_asyncua: connect OPC UA servers (PLCs) to Home Assistant.
 
 Hubs can be created from the UI (config flow) or from YAML. YAML hubs are
 imported as config entries so they get a device and optional discovery,
@@ -18,6 +18,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import discovery as ha_discovery
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
@@ -57,6 +58,7 @@ from .const import (
     DEFAULT_SECURITY_MODE,
     DOMAIN,
     ENTRY_PLATFORMS,
+    OLD_DOMAIN,
     SECURITY_MODES,
     SECURITY_POLICIES,
     SECURITY_POLICY_NONE,
@@ -73,7 +75,13 @@ from .entity import (
     nodeid_validator,
     yaml_nodeids,
 )
-from .hub import HubConfig, OpcuaHub, normalize_nodeid
+from .hub import HubConfig, OpcuaHub, normalize_nodeid, without_unused_security
+from .migration import (
+    async_adopt_old_entry,
+    async_migrate_config_entries,
+    async_migrate_registries,
+    async_report_old_yaml,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -161,7 +169,7 @@ def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for domain in YAML_PLATFORMS:
         for platform, p_conf in config_per_platform(config, domain):
-            if platform != DOMAIN:
+            if platform not in (DOMAIN, OLD_DOMAIN):
                 continue
             for node in p_conf.get(CONF_NODES, []) or []:
                 if not isinstance(node, dict) or CONF_NODE_HUB not in node:
@@ -178,9 +186,21 @@ def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up YAML hubs and the integration services."""
+    # Before any platform loads, so migrated entities keep their entity ids.
+    async_migrate_registries(hass)
+
     data = get_data(hass)
     data.yaml_nodeids = _collect_yaml_nodeids(config)
-    hub_confs: list[dict[str, Any]] = config.get(DOMAIN, [])
+    hub_confs: list[dict[str, Any]] = list(config.get(DOMAIN, []))
+    old_keys: list[str] = []
+    if OLD_DOMAIN in config:
+        old_keys.append(f"{OLD_DOMAIN}:")
+        try:
+            hub_confs += vol.All(cv.ensure_list, [HUB_SCHEMA])(config[OLD_DOMAIN])
+        except vol.Invalid as err:
+            _LOGGER.error(  # noqa: TRY400 - validation error, no traceback needed
+                "Invalid %s configuration: %s", OLD_DOMAIN, err
+            )
 
     names = [h[CONF_HUB_ID] for h in hub_confs]
     if len(names) != len(set(names)):
@@ -197,7 +217,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         data.hubs[hub.name] = hub
         data.yaml_hubs.add(hub.name)
         await hub.async_start()
-        import_data = {k: hub_conf[k] for k in HUB_KEYS if hub_conf.get(k) is not None}
+        import_data = without_unused_security(
+            {k: hub_conf[k] for k in HUB_KEYS if hub_conf.get(k) is not None}
+        )
         hass.async_create_task(
             hass.config_entries.flow.async_init(
                 DOMAIN, context={"source": SOURCE_IMPORT}, data=import_data
@@ -205,9 +227,24 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
 
     # Hubs removed from YAML: drop their imported config entries.
-    for entry in hass.config_entries.async_entries(DOMAIN):
-        if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
-            hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+    for domain in (DOMAIN, OLD_DOMAIN):
+        for entry in hass.config_entries.async_entries(domain):
+            if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
+                hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+    async_migrate_config_entries(hass)
+
+    # YAML entities still declared with the former domain: load them anyway.
+    for domain in YAML_PLATFORMS:
+        for platform, p_conf in config_per_platform(config, domain):
+            if platform != OLD_DOMAIN:
+                continue
+            old_keys.append(f"{domain}: platform {OLD_DOMAIN}")
+            hass.async_create_task(
+                ha_discovery.async_load_platform(
+                    hass, domain, DOMAIN, {**p_conf, "platform": DOMAIN}, config
+                )
+            )
+    async_report_old_yaml(hass, sorted(set(old_keys)))
 
     async def _stop_yaml_hubs(_event: Any) -> None:
         for name in list(data.yaml_hubs):
@@ -238,6 +275,12 @@ def _register_services(hass: HomeAssistant) -> None:
         entry = hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, name)
         if entry is None:
             msg = f"OPC UA hub {name!r} has no config entry"
+            raise ServiceValidationError(msg)
+        if not entry.options.get(CONF_DISCOVERY_ENABLED, False):
+            msg = (
+                f"Discovery is disabled for OPC UA hub {name!r}: enable it in "
+                "Settings > Devices & services > OPC UA (asyncua) > Configure"
+            )
             raise ServiceValidationError(msg)
         hass.config_entries.async_schedule_reload(entry.entry_id)
 
@@ -332,7 +375,9 @@ def _cleanup_registries(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> None:
     expected_entities = {
         default_unique_id(hub.name, v.nodeid) for v in runtime.variables
     }
-    expected_entities |= {f"{hub.name}_connected", f"{hub.name}_rediscover"}
+    expected_entities.add(f"{hub.name}_connected")
+    if entry.options.get(CONF_DISCOVERY_ENABLED, False):
+        expected_entities.add(f"{hub.name}_rediscover")
     ent_reg = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
         if ent.unique_id not in expected_entities:
@@ -364,6 +409,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
 
     runtime = EntryRuntime(hub=hub)
     entry.runtime_data = runtime
+    await async_adopt_old_entry(hass, entry)
 
     dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
@@ -375,6 +421,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
 
     if entry.options.get(CONF_DISCOVERY_ENABLED, False):
         await _async_run_discovery(hass, entry, runtime)
+    else:
+        _LOGGER.info(
+            "Discovery is disabled for OPC UA hub %s%s: enable it in the "
+            "integration options (Configure) to add the server variables",
+            hub.name,
+            " (imported from YAML)" if entry.source == SOURCE_IMPORT else "",
+        )
     if runtime.discovered_live or not entry.options.get(CONF_DISCOVERY_ENABLED, False):
         _cleanup_registries(hass, entry)
 

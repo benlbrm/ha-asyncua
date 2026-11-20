@@ -25,7 +25,6 @@ ignore = [
     "FBT001",  # Boolean-typed positional argument in function definition
     "FBT003",  # Boolean positional value in function call
     "ISC001",  # incompatible with formatter
-    "N999",    # Invalid module name (ha-asyncua contains hyphen)
     "PERF401", # Use list.extend (optimization suggestion)
     "PLR0912", # Too many branches
     "PLR0913", # Too many arguments (common in entity constructors)

@@ -1,4 +1,4 @@
-"""Light platform for ha-asyncua (YAML only)."""
+"""Light platform for ha_asyncua (YAML only)."""
 
 from __future__ import annotations
 
@@ -71,7 +71,14 @@ async def async_setup_platform(
             pulse_ms=conf.get(CONF_NODE_PULSE),
         )
 
-    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
+    await async_setup_yaml_platform(
+        hass,
+        config,
+        async_add_entities,
+        _factory,
+        discovery_info=discovery_info,
+        schema=PLATFORM_SCHEMA,
+    )
 
 
 class AsyncuaLight(AsyncuaEntity, LightEntity):

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from asyncua.common.node import Node
 
-DOMAIN = "ha-asyncua"
+DOMAIN = "ha_asyncua"
 
 
 def integration_module(name: str = "") -> Any:

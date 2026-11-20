@@ -290,6 +290,17 @@ async def test_yaml_setup(hass: HomeAssistant, opc_server: OpcServer) -> None:
     assert len(entries) == 1
     assert entries[0].source == SOURCE_IMPORT
     assert entries[0].options["discovery_enabled"] is False
+    # No security policy: the (default) security mode is not stored.
+    assert "security_mode" not in entries[0].data
+    # Discovery disabled: no rediscover button, the service says why.
+    assert (
+        er.async_get(hass).async_get_entity_id("button", DOMAIN, "plc_rediscover")
+        is None
+    )
+    with pytest.raises(ServiceValidationError, match="disabled"):
+        await hass.services.async_call(
+            DOMAIN, "rediscover", {"hub": "plc"}, blocking=True
+        )
 
     await _wait_state(hass, "sensor.temp", "21.5")
     await _wait_state(hass, "switch.start", STATE_ON)  # state from the feedback node

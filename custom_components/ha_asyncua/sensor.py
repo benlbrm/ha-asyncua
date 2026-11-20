@@ -1,4 +1,4 @@
-"""Sensor platform for ha-asyncua."""
+"""Sensor platform for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -91,7 +91,14 @@ async def async_setup_platform(
             precision=conf.get(CONF_NODE_PRECISION, 2),
         )
 
-    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
+    await async_setup_yaml_platform(
+        hass,
+        config,
+        async_add_entities,
+        _factory,
+        discovery_info=discovery_info,
+        schema=PLATFORM_SCHEMA,
+    )
 
 
 async def async_setup_entry(
