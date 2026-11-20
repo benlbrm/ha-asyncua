@@ -1,4 +1,4 @@
-"""Button platform for ha-asyncua: re-run discovery."""
+"""Button platform for ha_asyncua: re-run discovery."""
 
 from __future__ import annotations
 

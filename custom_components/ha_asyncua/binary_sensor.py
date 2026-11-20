@@ -1,4 +1,4 @@
-"""Binary sensor platform for ha-asyncua."""
+"""Binary sensor platform for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -75,7 +75,14 @@ async def async_setup_platform(
             device_class=conf.get(CONF_NODE_DEVICE_CLASS),
         )
 
-    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
+    await async_setup_yaml_platform(
+        hass,
+        config,
+        async_add_entities,
+        _factory,
+        discovery_info=discovery_info,
+        schema=PLATFORM_SCHEMA,
+    )
 
 
 async def async_setup_entry(

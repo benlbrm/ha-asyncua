@@ -2,7 +2,11 @@
 
 from typing import Final
 
-DOMAIN: Final = "ha-asyncua"
+DOMAIN: Final = "ha_asyncua"
+# Former domain (before 0.3.0): migrated at startup, still accepted in YAML.
+OLD_DOMAIN: Final = "ha-asyncua"
+# Certificates stay in the former folder so already trusted ones keep working.
+CERT_DIR: Final = "ha-asyncua"
 
 # Hub (OPC UA server) configuration keys.
 CONF_HUB_ID: Final = "name"

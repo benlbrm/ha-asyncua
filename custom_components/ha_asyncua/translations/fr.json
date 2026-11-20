@@ -140,5 +140,11 @@
         }
       }
     }
+  },
+  "issues": {
+    "old_yaml_domain": {
+      "title": "OPC UA : configuration.yaml utilise l'ancien domaine {old}",
+      "description": "Le domaine de l'intégration est maintenant `{new}` (Home Assistant n'accepte pas `-` dans un domaine). Votre YAML fonctionne encore, mais remplacez `{old}` par `{new}` dans configuration.yaml et les fichiers inclus ({keys}), par exemple `{new}:` pour les hubs et `platform: {new}` pour les entités, puis redémarrez Home Assistant. Les entités, leurs noms et l'historique sont conservés."
+    }
   }
 }

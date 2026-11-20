@@ -1,4 +1,4 @@
-"""Diagnostics for ha-asyncua."""
+"""Diagnostics for ha_asyncua."""
 
 from __future__ import annotations
 

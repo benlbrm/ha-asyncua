@@ -1,4 +1,4 @@
-"""Config flow for ha-asyncua."""
+"""Config flow for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -258,6 +258,18 @@ class AsyncuaConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="discovery",
             data_schema=_discovery_schema(user_input or DEFAULT_OPTIONS),
             errors=errors,
+        )
+
+    async def async_step_migrate(
+        self, migrate_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Re-create a UI hub of the former ``ha-asyncua`` domain."""
+        await self.async_set_unique_id(migrate_data["unique_id"])
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=migrate_data["title"],
+            data=without_unused_security(migrate_data["data"]),
+            options=migrate_data["options"],
         )
 
     async def async_step_import(self, import_data: dict[str, Any]) -> ConfigFlowResult:

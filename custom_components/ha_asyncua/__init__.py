@@ -1,5 +1,5 @@
 """
-ha-asyncua: connect OPC UA servers (PLCs) to Home Assistant.
+ha_asyncua: connect OPC UA servers (PLCs) to Home Assistant.
 
 Hubs can be created from the UI (config flow) or from YAML. YAML hubs are
 imported as config entries so they get a device and optional discovery,
@@ -18,6 +18,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import discovery as ha_discovery
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
 
@@ -57,6 +58,7 @@ from .const import (
     DEFAULT_SECURITY_MODE,
     DOMAIN,
     ENTRY_PLATFORMS,
+    OLD_DOMAIN,
     SECURITY_MODES,
     SECURITY_POLICIES,
     SECURITY_POLICY_NONE,
@@ -74,6 +76,12 @@ from .entity import (
     yaml_nodeids,
 )
 from .hub import HubConfig, OpcuaHub, normalize_nodeid, without_unused_security
+from .migration import (
+    async_adopt_old_entry,
+    async_migrate_config_entries,
+    async_migrate_registries,
+    async_report_old_yaml,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -161,7 +169,7 @@ def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
     result: dict[str, set[str]] = {}
     for domain in YAML_PLATFORMS:
         for platform, p_conf in config_per_platform(config, domain):
-            if platform != DOMAIN:
+            if platform not in (DOMAIN, OLD_DOMAIN):
                 continue
             for node in p_conf.get(CONF_NODES, []) or []:
                 if not isinstance(node, dict) or CONF_NODE_HUB not in node:
@@ -178,9 +186,21 @@ def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up YAML hubs and the integration services."""
+    # Before any platform loads, so migrated entities keep their entity ids.
+    async_migrate_registries(hass)
+
     data = get_data(hass)
     data.yaml_nodeids = _collect_yaml_nodeids(config)
-    hub_confs: list[dict[str, Any]] = config.get(DOMAIN, [])
+    hub_confs: list[dict[str, Any]] = list(config.get(DOMAIN, []))
+    old_keys: list[str] = []
+    if OLD_DOMAIN in config:
+        old_keys.append(f"{OLD_DOMAIN}:")
+        try:
+            hub_confs += vol.All(cv.ensure_list, [HUB_SCHEMA])(config[OLD_DOMAIN])
+        except vol.Invalid as err:
+            _LOGGER.error(  # noqa: TRY400 - validation error, no traceback needed
+                "Invalid %s configuration: %s", OLD_DOMAIN, err
+            )
 
     names = [h[CONF_HUB_ID] for h in hub_confs]
     if len(names) != len(set(names)):
@@ -207,9 +227,24 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
 
     # Hubs removed from YAML: drop their imported config entries.
-    for entry in hass.config_entries.async_entries(DOMAIN):
-        if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
-            hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+    for domain in (DOMAIN, OLD_DOMAIN):
+        for entry in hass.config_entries.async_entries(domain):
+            if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
+                hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
+    async_migrate_config_entries(hass)
+
+    # YAML entities still declared with the former domain: load them anyway.
+    for domain in YAML_PLATFORMS:
+        for platform, p_conf in config_per_platform(config, domain):
+            if platform != OLD_DOMAIN:
+                continue
+            old_keys.append(f"{domain}: platform {OLD_DOMAIN}")
+            hass.async_create_task(
+                ha_discovery.async_load_platform(
+                    hass, domain, DOMAIN, {**p_conf, "platform": DOMAIN}, config
+                )
+            )
+    async_report_old_yaml(hass, sorted(set(old_keys)))
 
     async def _stop_yaml_hubs(_event: Any) -> None:
         for name in list(data.yaml_hubs):
@@ -374,6 +409,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
 
     runtime = EntryRuntime(hub=hub)
     entry.runtime_data = runtime
+    await async_adopt_old_entry(hass, entry)
 
     dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,

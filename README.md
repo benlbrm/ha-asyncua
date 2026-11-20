@@ -15,6 +15,7 @@ Connect industrial PLCs and any OPC UA server to Home Assistant. Values are **pu
 - [Services](#services)
 - [Secure connections (certificates)](#secure-connections-certificates)
 - [Diagnostics](#diagnostics)
+- [Domain renamed to `ha_asyncua`](#domain-renamed-to-ha_asyncua)
 - [Upgrading from 0.1.x](#upgrading-from-01x)
 - [Development](#development)
 
@@ -90,7 +91,7 @@ YAML keeps working. Each YAML hub is also imported as an integration entry (so i
 ### Hub
 
 ```yaml
-ha-asyncua:
+ha_asyncua:
   - name: "plc-01"              # unique hub id
     url: "opc.tcp://192.168.0.10:4840/"
     username: admin             # optional (with password)
@@ -106,13 +107,13 @@ ha-asyncua:
 
 `scan_interval` is still accepted but ignored: values are pushed by subscription.
 
-Every entity below supports `name`, `hub`, and optional `unique_id` (default `ha-asyncua.<hub>.<nodeid>`). Node ids are validated at startup.
+Every entity below supports `name`, `hub`, and optional `unique_id` (default `ha_asyncua.<hub>.<nodeid>`). Node ids are validated at startup.
 
 ### Sensor
 
 ```yaml
 sensor:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Boiler temperature"
         hub: "plc-01"
@@ -127,7 +128,7 @@ sensor:
 
 ```yaml
 binary_sensor:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Garage detector"
         hub: "plc-01"
@@ -141,7 +142,7 @@ The command is written to `nodeid`; the state is read from `nodeid_switch_di` (e
 
 ```yaml
 switch:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Heater office"
         hub: "plc-01"
@@ -155,7 +156,7 @@ State is read from `nodeid`. `nodeid_light_on` / `nodeid_light_off` are optional
 
 ```yaml
 light:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Office"
         hub: "plc-01"
@@ -171,7 +172,7 @@ Position feedback (0–100) is required. Open / close / stop write `True` to the
 
 ```yaml
 cover:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Bedroom shutter"
         hub: "plc-01"
@@ -190,7 +191,7 @@ The value is converted to the node data type before writing (e.g. `21.0` → `In
 
 ```yaml
 number:
-  - platform: ha-asyncua
+  - platform: ha_asyncua
     nodes:
       - name: "Temperature setpoint"
         hub: "plc-01"
@@ -206,38 +207,38 @@ number:
 <summary>Split YAML entities in several files</summary>
 
 ```yaml
-binary_sensor ha-asyncua: !include_dir_merge_list opcua/binary_sensors/
-sensor ha-asyncua: !include_dir_merge_list opcua/sensors/
-switch ha-asyncua: !include_dir_merge_list opcua/switchs/
-light ha-asyncua: !include_dir_merge_list opcua/lights/
-cover ha-asyncua: !include_dir_merge_list opcua/covers/
-number ha-asyncua: !include_dir_merge_list opcua/numbers/
+binary_sensor ha_asyncua: !include_dir_merge_list opcua/binary_sensors/
+sensor ha_asyncua: !include_dir_merge_list opcua/sensors/
+switch ha_asyncua: !include_dir_merge_list opcua/switchs/
+light ha_asyncua: !include_dir_merge_list opcua/lights/
+cover ha_asyncua: !include_dir_merge_list opcua/covers/
+number ha_asyncua: !include_dir_merge_list opcua/numbers/
 ```
 
-Each file contains a list of `- platform: ha-asyncua` blocks.
+Each file contains a list of `- platform: ha_asyncua` blocks.
 
 </details>
 
 ## Services
 
-### `ha-asyncua.set_value`
+### `ha_asyncua.set_value`
 
 Write a value to any node. The value is converted to the node data type; errors (unknown hub, invalid value, write refused by the server, hub offline) are reported to the caller.
 
 ```yaml
-action: ha-asyncua.set_value
+action: ha_asyncua.set_value
 data:
   hub: plc-01
   nodeid: "ns=6;s=::AsGlobalPV:setpoint"
   value: 21.5
 ```
 
-### `ha-asyncua.rediscover`
+### `ha_asyncua.rediscover`
 
 Browse the server again and update discovered entities.
 
 ```yaml
-action: ha-asyncua.rediscover
+action: ha_asyncua.rediscover
 data:
   hub: plc-01
 ```
@@ -258,9 +259,28 @@ With a security policy other than `None`, the client needs a certificate trusted
 ```yaml
 logger:
   logs:
-    custom_components.ha-asyncua: debug
+    custom_components.ha_asyncua: debug
     asyncua: warning
 ```
+
+## Domain renamed to `ha_asyncua`
+
+Home Assistant does not accept `-` in an integration domain (brand icon, hassfest, HACS validation), so the domain is now **`ha_asyncua`** (the repository keeps its name).
+
+- **Automatic**: entities, devices and UI hubs are migrated at startup. Entity ids, names, customisations and history are kept.
+- **YAML**: replace `ha-asyncua` with `ha_asyncua` in `configuration.yaml` and the included files:
+
+  ```yaml
+  ha_asyncua:                 # was ha-asyncua:
+    - name: "plc-01"
+      ...
+  sensor:
+    - platform: ha_asyncua    # was platform: ha-asyncua
+  ```
+
+  Until then the old YAML still works, Home Assistant logs that `ha-asyncua` is not found and a repair issue lists what to rename.
+- Services are now `ha_asyncua.set_value` / `ha_asyncua.rediscover`; logger `custom_components.ha_asyncua`.
+- Auto-generated certificates stay in `/config/ha-asyncua/<hub>/`, so a certificate already trusted by the PLC keeps working.
 
 ## Upgrading from 0.1.x
 

@@ -19,6 +19,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
+    CERT_DIR,
     CONF_HUB_SECURITY_MODE,
     CONF_HUB_SECURITY_POLICY,
     DEFAULT_PUBLISHING_INTERVAL,
@@ -225,8 +226,10 @@ class OpcuaHub:
         client.secure_channel_timeout = 600_000
         client.session_timeout = 60_000
         client.name = f"Home Assistant {DOMAIN} ({self.config.name})"
+        # Unchanged since 0.1 (former domain): it is part of the client
+        # certificate that the server may already trust.
         client.application_uri = (
-            f"urn:{socket.gethostname()}:{DOMAIN}:{self.config.name}"
+            f"urn:{socket.gethostname()}:{CERT_DIR}:{self.config.name}"
         )
         if self.config.username:
             client.set_user(self.config.username)
@@ -238,7 +241,7 @@ class OpcuaHub:
         """Return (certificate, private key) paths used for secure connections."""
         if self.config.certificate and self.config.private_key:
             return Path(self.config.certificate), Path(self.config.private_key)
-        base = Path(self.hass.config.path(DOMAIN, self.config.name))
+        base = Path(self.hass.config.path(CERT_DIR, self.config.name))
         return base / "client_cert.der", base / "client_key.pem"
 
     async def _setup_security(self) -> None:

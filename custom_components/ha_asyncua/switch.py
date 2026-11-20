@@ -1,4 +1,4 @@
-"""Switch platform for ha-asyncua."""
+"""Switch platform for ha_asyncua."""
 
 from __future__ import annotations
 
@@ -69,7 +69,14 @@ async def async_setup_platform(
             unique_id=conf.get(CONF_NODE_UNIQUE_ID),
         )
 
-    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
+    await async_setup_yaml_platform(
+        hass,
+        config,
+        async_add_entities,
+        _factory,
+        discovery_info=discovery_info,
+        schema=PLATFORM_SCHEMA,
+    )
 
 
 async def async_setup_entry(

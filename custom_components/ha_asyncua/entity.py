@@ -1,4 +1,4 @@
-"""Base entity and helpers shared by every ha-asyncua platform."""
+"""Base entity and helpers shared by every ha_asyncua platform."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
-    from homeassistant.helpers.typing import ConfigType
+    from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
     from .discovery import DiscoveredVariable
 
@@ -175,8 +175,14 @@ async def async_setup_yaml_platform(
     config: ConfigType,
     async_add_entities: AddEntitiesCallback,
     factory: Callable[[OpcuaHub, dict[str, Any]], Entity],
+    *,
+    discovery_info: DiscoveryInfoType | None = None,
+    schema: Callable[[Any], ConfigType] | None = None,
 ) -> None:
     """Create YAML-configured entities, grouped by hub."""
+    if discovery_info is not None and schema is not None:
+        # Loaded by the integration (YAML written with the former domain).
+        config = schema(discovery_info)
     data = get_data(hass)
     entities: list[Entity] = []
     not_ready: set[str] = set()
