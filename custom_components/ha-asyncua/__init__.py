@@ -1,638 +1,408 @@
 """
-ha-asyncua: core module with OpcuaHub and AsyncuaCoordinator.
+ha-asyncua: connect OPC UA servers (PLCs) to Home Assistant.
 
-Provides:
-- async_setup(...) to register hubs from YAML
-- OpcuaHub : manages asyncua.Client, connection, subscription, reconnect
-- AsyncuaCoordinator : stores node list and cached values and triggers HA refreshes
+Hubs can be created from the UI (config flow) or from YAML. YAML hubs are
+imported as config entries so they get a device and optional discovery,
+while YAML entity platforms keep working unchanged.
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
-import threading
 from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from asyncua import Client, ua
-from asyncua.common import ua_utils
-from asyncua.ua.uatypes import DataValue
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryError
-from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.config_entries import SOURCE_IMPORT
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.storage import Store
+
+try:
+    from homeassistant.config import config_per_platform
+except ImportError:  # Home Assistant < 2026.x
+    from homeassistant.helpers import config_per_platform  # type: ignore[attr-defined, no-redef]
 
 from .const import (
     ATTR_NODE_HUB,
     ATTR_NODE_ID,
     ATTR_VALUE,
+    CONF_DISCOVERY_ENABLED,
+    CONF_DISCOVERY_EXCLUDE,
+    CONF_DISCOVERY_INCLUDE,
+    CONF_DISCOVERY_MAX_DEPTH,
+    CONF_DISCOVERY_NAMESPACES,
+    CONF_DISCOVERY_ROOT,
+    CONF_DISCOVERY_WRITABLE,
+    CONF_HUB_CERTIFICATE,
     CONF_HUB_ID,
     CONF_HUB_MANUFACTURER,
     CONF_HUB_MODEL,
     CONF_HUB_PASSWORD,
+    CONF_HUB_PRIVATE_KEY,
+    CONF_HUB_PUBLISHING_INTERVAL,
     CONF_HUB_SCAN_INTERVAL,
+    CONF_HUB_SECURITY_MODE,
+    CONF_HUB_SECURITY_POLICY,
     CONF_HUB_URL,
     CONF_HUB_USERNAME,
-    CONF_NODE_ID,
+    CONF_NODE_HUB,
+    CONF_NODES,
+    DEFAULT_DISCOVERY_MAX_DEPTH,
+    DEFAULT_DISCOVERY_ROOT,
+    DEFAULT_PUBLISHING_INTERVAL,
+    DEFAULT_SECURITY_MODE,
     DOMAIN,
+    ENTRY_PLATFORMS,
+    SECURITY_MODES,
+    SECURITY_POLICIES,
+    SECURITY_POLICY_NONE,
+    SERVICE_REDISCOVER,
     SERVICE_SET_VALUE,
+    YAML_PLATFORMS,
 )
+from .discovery import DiscoveredVariable, DiscoveryFilter, async_discover
+from .entity import (
+    AsyncuaConfigEntry,
+    EntryRuntime,
+    default_unique_id,
+    get_data,
+    nodeid_validator,
+    yaml_nodeids,
+)
+from .hub import HubConfig, OpcuaHub, normalize_nodeid
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from homeassistant.helpers.typing import ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
-# asyncua logs BadNoSubscription from its internal publish loop without calling
-# status_change_notification on the handler — intercept the logger directly.
-_ASYNCUA_PROTOCOL_LOGGER = "asyncua.client.ua_client.UASocketProtocol"
+STORAGE_VERSION = 1
+DISCOVERY_CONNECT_TIMEOUT = 15
 
-# OPC UA error codes that indicate the subscription/session is no longer valid.
-_SUBSCRIPTION_INVALIDATING_ERRORS = frozenset((
-    "BadNoSubscription",
-    "BadSessionClosed",
-    "BadSessionIdInvalid",
-    "BadSubscriptionIdInvalid",
-    "BadConnectionClosed",
-))
-
-
-class _BadNoSubscriptionLogHandler(logging.Handler):
-    """Detect BadNoSubscription in asyncua internal logs and trigger hub reconnect."""
-
-    def __init__(self, loop: asyncio.AbstractEventLoop, hub: OpcuaHub) -> None:
-        super().__init__(level=logging.WARNING)
-        self._loop = loop
-        self._hub = hub
-        self._triggered = False
-        self._lock = threading.Lock()
-
-    def emit(self, record: logging.LogRecord) -> None:
-        if "BadNoSubscription" not in record.getMessage():
-            return
-        with self._lock:
-            if self._triggered:
-                return
-            self._triggered = True
-        _LOGGER.warning(
-            "BadNoSubscription detected via log interceptor (hub=%s) — forcing reconnect",
-            self._hub.hub_name,
-        )
-        self._loop.call_soon_threadsafe(
-            self._loop.create_task,
-            self._hub.handle_subscription_status_change("BadNoSubscription"),
-        )
-
-    def reset(self) -> None:
-        """Allow future triggers after a reconnect."""
-        with self._lock:
-            self._triggered = False
-
-
-BASE_SCHEMA = vol.Schema(
+HUB_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HUB_ID): cv.string,
         vol.Required(CONF_HUB_URL): cv.string,
         vol.Optional(CONF_HUB_MANUFACTURER, default=""): cv.string,
         vol.Optional(CONF_HUB_MODEL, default=""): cv.string,
-        vol.Optional(CONF_HUB_SCAN_INTERVAL, default=5): int,
-        vol.Inclusive(CONF_HUB_USERNAME, None): cv.string,
-        vol.Inclusive(CONF_HUB_PASSWORD, None): cv.string,
+        # Deprecated: values are pushed by subscription, polling is not used.
+        vol.Optional(CONF_HUB_SCAN_INTERVAL): vol.Coerce(int),
+        vol.Optional(
+            CONF_HUB_PUBLISHING_INTERVAL, default=DEFAULT_PUBLISHING_INTERVAL
+        ): vol.All(vol.Coerce(int), vol.Range(min=10)),
+        vol.Inclusive(CONF_HUB_USERNAME, "credentials"): cv.string,
+        vol.Inclusive(CONF_HUB_PASSWORD, "credentials"): cv.string,
+        vol.Optional(CONF_HUB_SECURITY_POLICY, default=SECURITY_POLICY_NONE): vol.In(
+            SECURITY_POLICIES
+        ),
+        vol.Optional(CONF_HUB_SECURITY_MODE, default=DEFAULT_SECURITY_MODE): vol.In(
+            SECURITY_MODES
+        ),
+        vol.Inclusive(CONF_HUB_CERTIFICATE, "certificate"): cv.isfile,
+        vol.Inclusive(CONF_HUB_PRIVATE_KEY, "certificate"): cv.isfile,
     }
+)
+
+CONFIG_SCHEMA = vol.Schema(
+    {DOMAIN: vol.All(cv.ensure_list, [HUB_SCHEMA])}, extra=vol.ALLOW_EXTRA
 )
 
 SERVICE_SET_VALUE_SCHEMA = vol.Schema(
     {
         vol.Required(ATTR_NODE_HUB): cv.string,
-        vol.Required(ATTR_NODE_ID): cv.string,
-        vol.Required(ATTR_VALUE): vol.Any(
-            float, int, str, cv.byte, cv.boolean, cv.time
-        ),
+        vol.Required(ATTR_NODE_ID): nodeid_validator,
+        vol.Required(ATTR_VALUE): vol.Any(bool, int, float, str),
     }
 )
+SERVICE_REDISCOVER_SCHEMA = vol.Schema({vol.Required(ATTR_NODE_HUB): cv.string})
 
-CONFIG_SCHEMA = vol.Schema(
-    {DOMAIN: vol.All(cv.ensure_list, [BASE_SCHEMA])}, extra=vol.ALLOW_EXTRA
+HUB_KEYS = (
+    CONF_HUB_ID,
+    CONF_HUB_URL,
+    CONF_HUB_MANUFACTURER,
+    CONF_HUB_MODEL,
+    CONF_HUB_PUBLISHING_INTERVAL,
+    CONF_HUB_USERNAME,
+    CONF_HUB_PASSWORD,
+    CONF_HUB_SECURITY_POLICY,
+    CONF_HUB_SECURITY_MODE,
+    CONF_HUB_CERTIFICATE,
+    CONF_HUB_PRIVATE_KEY,
 )
 
 
-class AsyncuaSubscriptionHandler:
-    """Handle subscription events from OPC UA server."""
+def hub_config_from(data: Mapping[str, Any]) -> HubConfig:
+    """Build a HubConfig from YAML or config entry data."""
+    return HubConfig(
+        name=data[CONF_HUB_ID],
+        url=data[CONF_HUB_URL],
+        username=data.get(CONF_HUB_USERNAME) or None,
+        password=data.get(CONF_HUB_PASSWORD) or None,
+        manufacturer=data.get(CONF_HUB_MANUFACTURER, ""),
+        model=data.get(CONF_HUB_MODEL, ""),
+        publishing_interval=int(
+            data.get(CONF_HUB_PUBLISHING_INTERVAL, DEFAULT_PUBLISHING_INTERVAL)
+        ),
+        security_policy=data.get(CONF_HUB_SECURITY_POLICY, SECURITY_POLICY_NONE),
+        security_mode=data.get(CONF_HUB_SECURITY_MODE, DEFAULT_SECURITY_MODE),
+        certificate=data.get(CONF_HUB_CERTIFICATE) or None,
+        private_key=data.get(CONF_HUB_PRIVATE_KEY) or None,
+    )
 
-    def __init__(self, hub: OpcuaHub) -> None:
-        self.hub = hub
 
-    async def datachange_notification(self, node, val, data) -> None:
-        """Handle data change notification from subscription."""
-        try:
-            nodeid = node.nodeid.to_string()
-            self.hub.cache_val[nodeid] = val
-            _LOGGER.debug("DataChange: %s = %s", nodeid, val)
-            await self.hub.notify_update()
-        except Exception as e:
-            _LOGGER.warning("Error in datachange_notification: %s", e)
-            if "BadNoSubscription" in str(e) or "BadSession" in str(e):
-                await self.status_change_notification(e)
-
-    async def event_notification(self, event) -> None:
-        """Handle event notifications (not used widely here)."""
-        _LOGGER.debug("Event: %s", event)
-
-    async def status_change_notification(self, status) -> None:
-        """Handle subscription status changes (e.g., BadSessionClosed, BadNoSubscription)."""
-        status_str = str(status)
-        _LOGGER.warning("Subscription status changed: %s", status_str)
-
-        # Check for subscription-invalidating errors
-        if any(err in status_str for err in _SUBSCRIPTION_INVALIDATING_ERRORS):
-            _LOGGER.warning("Subscription invalidated, forcing full reconnect")
-            # Mark subscription as invalid immediately
-            self.hub._subscription = None
-            self.hub._connected = False
-
-        # Trigger hub to handle it (disconnect -> reconnect -> resubscribe)
-        asyncio.create_task(self.hub.handle_subscription_status_change(status))
+def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
+    """Return node ids used by YAML entities of this integration, per hub."""
+    result: dict[str, set[str]] = {}
+    for domain in YAML_PLATFORMS:
+        for platform, p_conf in config_per_platform(config, domain):
+            if platform != DOMAIN:
+                continue
+            for node in p_conf.get(CONF_NODES, []) or []:
+                if not isinstance(node, dict) or CONF_NODE_HUB not in node:
+                    continue
+                ids = result.setdefault(str(node[CONF_NODE_HUB]), set())
+                for nodeid in yaml_nodeids(node):
+                    ids.add(nodeid)
+                    try:
+                        ids.add(normalize_nodeid(nodeid))
+                    except Exception:  # noqa: S112 - invalid ids are reported by the platform
+                        continue
+    return result
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the ha-asyncua integration and hubs from YAML config."""
-    hass.data.setdefault(DOMAIN, {})
+    """Set up YAML hubs and the integration services."""
+    data = get_data(hass)
+    data.yaml_nodeids = _collect_yaml_nodeids(config)
+    hub_confs: list[dict[str, Any]] = config.get(DOMAIN, [])
 
-    async def _set_value(service) -> bool:
-        """Service handler to set a node value."""
-        hub_id = service.data[ATTR_NODE_HUB]
-        hub_coordinator = hass.data[DOMAIN].get(hub_id)
-        if not hub_coordinator:
-            msg = f"Hub {hub_id} not found"
-            raise ConfigEntryError(msg)
-        hub = hub_coordinator.hub
-        await hub.set_value(
-            nodeid=service.data[ATTR_NODE_ID], value=service.data[ATTR_VALUE]
-        )
-        return True
+    names = [h[CONF_HUB_ID] for h in hub_confs]
+    if len(names) != len(set(names)):
+        _LOGGER.error("Duplicated OPC UA hub names in configuration: %s", names)
+        return False
 
-    async def _configure_hub(hub_conf: dict[str, Any]) -> None:
-        hub_id = hub_conf[CONF_HUB_ID]
-        if hub_id in hass.data[DOMAIN]:
-            msg = f"Duplicated hub ID {hub_id}"
-            raise ConfigEntryError(msg)
-
-        opcua_hub = OpcuaHub(
-            hub_name=hub_id,
-            hub_manufacturer=hub_conf.get(CONF_HUB_MANUFACTURER, ""),
-            hub_model=hub_conf.get(CONF_HUB_MODEL, ""),
-            hub_url=hub_conf[CONF_HUB_URL],
-            username=hub_conf.get(CONF_HUB_USERNAME),
-            password=hub_conf.get(CONF_HUB_PASSWORD),
+    for hub_conf in hub_confs:
+        if CONF_HUB_SCAN_INTERVAL in hub_conf:
+            _LOGGER.info(
+                "Hub %s: 'scan_interval' is ignored (values are pushed by subscription)",
+                hub_conf[CONF_HUB_ID],
+            )
+        hub = OpcuaHub(hass, hub_config_from(hub_conf))
+        data.hubs[hub.name] = hub
+        data.yaml_hubs.add(hub.name)
+        await hub.async_start()
+        import_data = {k: hub_conf[k] for k in HUB_KEYS if hub_conf.get(k) is not None}
+        hass.async_create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN, context={"source": SOURCE_IMPORT}, data=import_data
+            )
         )
 
-        coordinator = AsyncuaCoordinator(hass=hass, name=hub_id, hub=opcua_hub)
-        hass.data[DOMAIN][hub_id] = coordinator
+    # Hubs removed from YAML: drop their imported config entries.
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
+            hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
 
-        # connect immediately (fire and forget inside because connect has its own backoff)
-        await opcua_hub.connect()
+    async def _stop_yaml_hubs(_event: Any) -> None:
+        for name in list(data.yaml_hubs):
+            await data.hubs[name].async_stop()
 
-        # ensure clean disconnect at shutdown
-        @callback
-        async def _async_stop(_event) -> None:
-            await opcua_hub.shutdown()
-
-        hass.bus.async_listen_once("homeassistant_stop", _async_stop)
-
-    # configure all hubs
-    await asyncio.gather(*[_configure_hub(h) for h in config.get(DOMAIN, [])])
-
-    hass.services.async_register(
-        domain=DOMAIN,
-        service=SERVICE_SET_VALUE,
-        service_func=_set_value,
-        schema=SERVICE_SET_VALUE_SCHEMA,
-    )
-
-    _LOGGER.info(
-        "ha-asyncua setup complete with hubs: %s", list(hass.data[DOMAIN].keys())
-    )
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_yaml_hubs)
+    _register_services(hass)
     return True
 
 
-class OpcuaHub:
-    """Manage connection + subscription + reconnection to an OPC UA server."""
+def _register_services(hass: HomeAssistant) -> None:
+    data = get_data(hass)
 
-    def __init__(
-        self,
-        hub_name: str,
-        hub_manufacturer: str,
-        hub_model: str,
-        hub_url: str,
-        username: str | None = None,
-        password: str | None = None,
-        timeout: float = 5.0,
-    ) -> None:
-        self._hub_name = hub_name
-        self._hub_url = hub_url
-        self._username = username
-        self._password = password
-        self._timeout = timeout
-        self._connected = False
-        self.device_info = DeviceInfo(
-            configuration_url=hub_url, manufacturer=hub_manufacturer, model=hub_model
+    def _hub(name: str) -> OpcuaHub:
+        hub = data.hubs.get(name)
+        if hub is None:
+            msg = f"OPC UA hub {name!r} not found (known: {', '.join(data.hubs) or 'none'})"
+            raise ServiceValidationError(msg)
+        return hub
+
+    async def _set_value(call: ServiceCall) -> None:
+        hub = _hub(call.data[ATTR_NODE_HUB])
+        await hub.async_write(call.data[ATTR_NODE_ID], call.data[ATTR_VALUE])
+
+    async def _rediscover(call: ServiceCall) -> None:
+        name = call.data[ATTR_NODE_HUB]
+        _hub(name)
+        entry = hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, name)
+        if entry is None:
+            msg = f"OPC UA hub {name!r} has no config entry"
+            raise ServiceValidationError(msg)
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_SET_VALUE, _set_value, schema=SERVICE_SET_VALUE_SCHEMA
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_REDISCOVER, _rediscover, schema=SERVICE_REDISCOVER_SCHEMA
+    )
+
+
+def discovery_filter(entry: AsyncuaConfigEntry, skip: set[str]) -> DiscoveryFilter:
+    """Build the discovery filter from the entry options."""
+    opts = entry.options
+    namespaces = {
+        int(ns)
+        for ns in str(opts.get(CONF_DISCOVERY_NAMESPACES, "") or "")
+        .replace(" ", "")
+        .split(",")
+        if ns.isdigit()
+    }
+    return DiscoveryFilter(
+        root=opts.get(CONF_DISCOVERY_ROOT) or DEFAULT_DISCOVERY_ROOT,
+        max_depth=int(opts.get(CONF_DISCOVERY_MAX_DEPTH, DEFAULT_DISCOVERY_MAX_DEPTH)),
+        include=opts.get(CONF_DISCOVERY_INCLUDE) or None,
+        exclude=opts.get(CONF_DISCOVERY_EXCLUDE) or None,
+        namespaces=namespaces,
+        skip_nodeids=skip,
+        writable=opts.get(CONF_DISCOVERY_WRITABLE) or None,
+    )
+
+
+async def _async_run_discovery(
+    hass: HomeAssistant, entry: AsyncuaConfigEntry, runtime: EntryRuntime
+) -> None:
+    """Discover variables, falling back to the last stored result when offline."""
+    hub = runtime.hub
+    store: Store[dict[str, Any]] = Store(
+        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.discovery"
+    )
+    if await hub.async_wait_connected(DISCOVERY_CONNECT_TIMEOUT):
+        skip = get_data(hass).yaml_nodeids.get(hub.name, set())
+        try:
+            variables, truncated = await async_discover(
+                hub.client, discovery_filter(entry, skip)
+            )
+        except Exception:
+            _LOGGER.exception("OPC UA discovery failed on hub %s", hub.name)
+        else:
+            runtime.variables, runtime.truncated, runtime.discovered_live = (
+                variables,
+                truncated,
+                True,
+            )
+            await store.async_save(
+                {"variables": [v.as_dict() for v in variables], "truncated": truncated}
+            )
+            _LOGGER.info("Hub %s: discovered %d variables", hub.name, len(variables))
+            return
+
+    cached = await store.async_load()
+    if cached:
+        runtime.variables = [
+            DiscoveredVariable.from_dict(v) for v in cached["variables"]
+        ]
+        runtime.truncated = cached.get("truncated", False)
+        _LOGGER.info(
+            "Hub %s unreachable: using %d cached discovered variables",
+            hub.name,
+            len(runtime.variables),
         )
-        self.client = self._make_client()
-
-        self.cache_val: dict[str, Any] = {}
-        self._subscription = None
-        self._lock = asyncio.Lock()
-        self._reconnect_task: asyncio.Task | None = None
-        self._log_handler: _BadNoSubscriptionLogHandler | None = None
-        self._coordinator: AsyncuaCoordinator | None = None
-        self._backoff = 5
-        self._shutdown = False
-
-    def _make_client(self) -> Client:
-        """Create and configure a fresh asyncua Client."""
-        client = Client(url=self._hub_url, timeout=int(self._timeout))
-        client.secure_channel_timeout = 60000
-        client.session_timeout = 60000
-        if self._username:
-            client.set_user(username=self._username)
-        if self._password:
-            client.set_password(pwd=self._password)
-        return client
-
-    @property
-    def hub_name(self) -> str:
-        """Return hub id/name."""
-        return self._hub_name
-
-    @property
-    def connected(self) -> bool:
-        """Return connection status."""
-        return self._connected
-
-    async def connect(self) -> None:
-        """
-        Establish a connection to the OPC UA server.
-
-        This method is idempotent and uses a lock to avoid concurrent connects.
-        It resets backoff on success and clears stale cache.
-        """
-        async with self._lock:
-            if self._shutdown:
-                _LOGGER.debug("Not connecting: hub marked for shutdown")
-                return
-            if self._connected:
-                return
-            try:
-                _LOGGER.info("Connecting to OPC UA server %s", self._hub_url)
-                await asyncio.wait_for(self.client.connect(), timeout=10)
-                self._connected = True
-                self._backoff = 5
-                # clear stale cache on new connection
-                self.cache_val.clear()
-                _LOGGER.info("Connected to OPC UA server %s", self._hub_url)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._connected = False
-                _LOGGER.exception("Failed to connect to %s: %s", self._hub_url, exc)
-                # schedule reconnect loop if not already scheduled
-                await self.schedule_reconnect()
-
-    async def disconnect(self) -> None:
-        """Disconnect and clean up subscription (if any)."""
-        async with self._lock:
-            if self._subscription:
-                try:
-                    await self._subscription.delete()
-                except Exception as e:
-                    _LOGGER.debug("Error while deleting subscription: %s", e)
-                self._subscription = None
-            if self._connected:
-                try:
-                    await asyncio.wait_for(self.client.disconnect(), timeout=5)
-                except Exception as e:
-                    _LOGGER.debug("Error during client disconnect: %s", e)
-            self._connected = False
-            _LOGGER.info("Disconnected from OPC UA server %s", self._hub_url)
-
-    async def subscribe_nodes(self, node_key_pair: dict[str, str]) -> None:
-        """
-        Create subscription for provided node ids and read initial values.
-
-        Safe: will attempt connect first. If not connected after attempt, returns.
-        Improved: detect server ServiceFault / BadNoSubscription and force a full
-        reconnect/resubscribe attempt once. Iterate over a stable snapshot of nodes
-        to avoid concurrent-dict mutation errors.
-        """
-        await self.connect()
-        if not self._connected or self._shutdown:
-            _LOGGER.debug("Not subscribing: hub not connected or shutting down")
-            return
-
-        # clean previous subscription if present
-        if self._subscription:
-            try:
-                await self._subscription.delete()
-            except Exception as e:
-                _LOGGER.debug("Error deleting old subscription: %s", e)
-            self._subscription = None
-
-        # Use a stable snapshot of node ids to avoid "dictionary changed size during iteration"
-        node_ids = list(node_key_pair.values())
-
-        async def _create_subscription() -> bool:
-            """Try to create a subscription and return True on success."""
-            try:
-                handler = AsyncuaSubscriptionHandler(self)
-                # create subscription with handler that will call back into hub
-                self._subscription = await self.client.create_subscription(100, handler)
-                _LOGGER.info("Subscription created (hub=%s)", self._hub_name)
-                return True
-            except Exception as exc:
-                _LOGGER.warning("Failed to create subscription: %s", exc)
-                return False
-
-        created = await _create_subscription()
-        if not created:
-            # On first failure attempt a defensive reconnect then retry once.
-            _LOGGER.debug(
-                "First subscription creation failed, attempting defensive reconnect (hub=%s)",
-                self._hub_name,
-            )
-            with contextlib.suppress(Exception):
-                await self.disconnect()
-            with contextlib.suppress(Exception):
-                await self.connect()
-
-            created = await _create_subscription()
-            if not created:
-                _LOGGER.error(
-                    "Could not create subscription after retry, scheduling reconnect (hub=%s)",
-                    self._hub_name,
-                )
-                await self.schedule_reconnect()
-                return
-
-        # subscribe to nodes using the stable snapshot
-        for nodeid in node_ids:
-            try:
-                node = self.client.get_node(nodeid)
-                try:
-                    # subscribe_data_change may raise if server-side subscription state is invalid
-                    await self._subscription.subscribe_data_change(node)
-                except Exception as exc:
-                    msg = str(exc)
-                    _LOGGER.warning(
-                        "subscribe_data_change failed for %s: %s", nodeid, exc
-                    )
-
-                    # Detect server-side subscription errors that require full reconnect.
-                    if any(
-                        x in msg
-                        for x in (
-                            "BadNoSubscription",
-                            "BadSubscriptionIdInvalid",
-                            "ServiceFault",
-                        )
-                    ):
-                        _LOGGER.warning(
-                            "Server reports invalid/stale subscription for %s: %s. Forcing full reconnect/resubscribe.",
-                            nodeid,
-                            msg,
-                        )
-                        # try to cleanup and schedule a reconnect/resubscribe
-                        try:
-                            await self.disconnect()
-                        except Exception:
-                            _LOGGER.debug(
-                                "Disconnect while handling stale subscription failed",
-                                exc_info=True,
-                            )
-                        await asyncio.sleep(1)
-                        await self.schedule_reconnect()
-                        # stop processing further nodes now — reconnect task will resubscribe whole node list
-                        return
-                    # otherwise continue with other nodes
-                    continue
-
-                # attempt to read initial value with timeout
-                try:
-                    val = await asyncio.wait_for(node.read_value(), timeout=3)
-                    self.cache_val[nodeid] = val
-                    _LOGGER.debug("Initial read %s = %s", nodeid, val)
-                except Exception as e:
-                    _LOGGER.debug("Initial read failed for %s: %s", nodeid, e)
-            except Exception as e:
-                _LOGGER.warning(
-                    "Failed to prepare subscription for node %s: %s", nodeid, e
-                )
-
-        _LOGGER.info("Subscribed to %d nodes for hub %s", len(node_ids), self._hub_name)
-        self._register_log_handler()
-
-    async def set_value(self, nodeid: str, value: Any) -> bool:
-        """Write a value to a node, with safety: connect first, timeout, and reconnect on failure."""
-        await self.connect()
-        if not self._connected:
-            _LOGGER.error("Cannot write: hub not connected")
-            return False
-        try:
-            node = self.client.get_node(nodeid=nodeid)
-            node_type = await asyncio.wait_for(
-                node.read_data_type_as_variant_type(), timeout=3
-            )
-            var = ua.Variant(
-                ua_utils.string_to_variant(string=str(value), vtype=node_type)
-            )
-            await asyncio.wait_for(node.write_value(DataValue(var)), timeout=4)
-            _LOGGER.debug("Wrote %s to %s", value, nodeid)
-            return True
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            _LOGGER.exception("Write failed to %s: %s", nodeid, exc)
-            await self.schedule_reconnect()
-            return False
-
-    async def handle_subscription_status_change(self, status: Any) -> None:
-        """Called by subscription handler on status change — force full reconnect/resubscribe."""
-        _LOGGER.warning("Handling subscription status change: %s", status)
-
-        # Force disconnect and recreate client to clear stale state
-        try:
-            await self._force_full_disconnect()
-        except Exception as e:
-            _LOGGER.debug("Force disconnect during status change handler failed: %s", e)
-
-        await self.schedule_reconnect()
-
-    def _register_log_handler(self) -> None:
-        """Register the asyncua log interceptor (idempotent)."""
-        if self._log_handler is not None:
-            return
-        loop = asyncio.get_running_loop()
-        self._log_handler = _BadNoSubscriptionLogHandler(loop=loop, hub=self)
-        logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).addHandler(self._log_handler)
-        _LOGGER.debug(
-            "BadNoSubscription log interceptor registered for hub %s", self._hub_name
+    else:
+        _LOGGER.warning(
+            "Hub %s unreachable: discovery postponed until connected", hub.name
         )
 
-    def _unregister_log_handler(self) -> None:
-        """Unregister and reset the asyncua log interceptor."""
-        if self._log_handler is None:
-            return
-        logging.getLogger(_ASYNCUA_PROTOCOL_LOGGER).removeHandler(self._log_handler)
-        self._log_handler = None
-        _LOGGER.debug(
-            "BadNoSubscription log interceptor removed for hub %s", self._hub_name
-        )
+    # Re-run a live discovery as soon as the server is reachable.
+    @callback
+    def _on_connection() -> None:
+        if hub.connected:
+            remove()
+            hass.config_entries.async_schedule_reload(entry.entry_id)
 
-    async def _force_full_disconnect(self) -> None:
-        """Force a complete disconnection and recreate the client."""
-        self._unregister_log_handler()
-        async with self._lock:
-            # Clear subscription reference
-            self._subscription = None
-
-            # Try to disconnect gracefully
-            try:
-                await asyncio.wait_for(self.client.disconnect(), timeout=3)
-            except Exception as e:
-                _LOGGER.debug("Error during forced disconnect: %s", e)
-
-            # Mark as disconnected
-            self._connected = False
-
-            # Recreate the client to clear any stale internal state
-            self.client = self._make_client()
-            _LOGGER.info("Client recreated for hub %s", self._hub_name)
-
-    async def schedule_reconnect(self) -> None:
-        """Start a reconnect loop with exponential backoff (non-blocking)."""
-        if self._shutdown:
-            _LOGGER.debug("Not scheduling reconnect: hub is shutting down")
-            return
-        if self._reconnect_task and not self._reconnect_task.done():
-            _LOGGER.debug("Reconnect already scheduled - skipping")
-            return
-
-        async def _reconnect_loop() -> None:
-            backoff = self._backoff
-            while not self._connected and not self._shutdown:
-                _LOGGER.info(
-                    "Reconnect attempt in %s seconds (hub=%s)", backoff, self._hub_name
-                )
-                await asyncio.sleep(backoff)
-                try:
-                    # Force full disconnect and recreate client to clear stale state
-                    with contextlib.suppress(Exception):
-                        await self._force_full_disconnect()
-                    await self.connect()
-                    if self._connected:
-                        _LOGGER.info(
-                            "Reconnected (hub=%s), will resubscribe nodes",
-                            self._hub_name,
-                        )
-                        # reset backoff and resubscribe
-                        self._backoff = 5
-                        if self._coordinator:
-                            await self._coordinator.setup_subscription()
-                        return
-                except asyncio.CancelledError:
-                    _LOGGER.debug("Reconnect loop cancelled")
-                    return
-                except Exception as exc:
-                    _LOGGER.warning("Reconnect attempt failed: %s", exc)
-                backoff = min(backoff * 2, 60)
-
-        self._reconnect_task = asyncio.create_task(_reconnect_loop())
-
-    async def notify_update(self) -> None:
-        """Notify coordinator (if present) that data changed."""
-        if self._coordinator:
-            # Immediately push the latest cache to the coordinator and notify listeners.
-            # Use a shallow copy to avoid concurrent mutation of the shared cache.
-            self._coordinator.async_set_updated_data({**self.cache_val})
-
-    async def shutdown(self) -> None:
-        """Shutdown hub: cancel reconnect task and disconnect client."""
-        self._shutdown = True
-        self._unregister_log_handler()
-        # cancel reconnect task
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            with contextlib.suppress(Exception):
-                await self._reconnect_task
-        # disconnect client
-        try:
-            await self.disconnect()
-        except Exception as e:
-            _LOGGER.debug("Error during hub.shutdown(): %s", e)
+    remove = hub.async_add_connection_listener(_on_connection)
+    entry.async_on_unload(remove)
 
 
-class AsyncuaCoordinator(DataUpdateCoordinator):
-    """Coordinator storing cached node values and managing subscriptions."""
+def _cleanup_registries(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> None:
+    """Remove entities/devices of nodes that disappeared from the server."""
+    runtime = entry.runtime_data
+    hub = runtime.hub
+    expected_entities = {
+        default_unique_id(hub.name, v.nodeid) for v in runtime.variables
+    }
+    expected_entities |= {f"{hub.name}_connected", f"{hub.name}_rediscover"}
+    ent_reg = er.async_get(hass)
+    for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if ent.unique_id not in expected_entities:
+            _LOGGER.info("Removing stale OPC UA entity %s", ent.entity_id)
+            ent_reg.async_remove(ent.entity_id)
 
-    def __init__(self, hass: HomeAssistant, name: str, hub: OpcuaHub) -> None:
-        self._hub = hub
-        # let hub reference coordinator for resubscribe
-        self._hub._coordinator = self
-        self._node_key_pair: dict[str, str] = {}
-        self._sensors: list[dict[str, str]] = []
-        self._subscription_task: asyncio.Task | None = None
-        super().__init__(hass=hass, logger=_LOGGER, name=name, update_interval=None)
+    expected_devices = {(DOMAIN, hub.name)} | {
+        (DOMAIN, f"{hub.name}:{v.device_id}") for v in runtime.variables if v.device_id
+    }
+    dev_reg = dr.async_get(hass)
+    for device in dr.async_entries_for_config_entry(dev_reg, entry.entry_id):
+        if not device.identifiers & expected_devices:
+            dev_reg.async_update_device(
+                device.id, remove_config_entry_id=entry.entry_id
+            )
 
-    @property
-    def hub(self) -> OpcuaHub:
-        """Return the linked hub."""
-        return self._hub
 
-    def add_sensors(self, sensors: list[dict[str, str]]) -> bool:
-        """
-        Register sensors and schedule a subscription setup.
+async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> bool:
+    """Set up an OPC UA hub from a config entry."""
+    data = get_data(hass)
+    name = entry.data[CONF_HUB_ID]
+    if name in data.yaml_hubs:
+        # The hub is owned by YAML (already started in async_setup).
+        hub = data.hubs[name]
+    else:
+        hub = OpcuaHub(hass, hub_config_from(entry.data))
+        data.hubs[name] = hub
+        await hub.async_start()
 
-        The node_key_pair stores mapping nodeid->nodeid so we can subscribe easily.
-        """
-        # extend only with provided sensors (avoid duplicating)
-        for val in sensors:
-            if val not in self._sensors:
-                self._sensors.append(val)
-                _LOGGER.debug(
-                    "add_sensors incoming sensor dict keys: %s", list(val.keys())
-                )
-                _LOGGER.debug(
-                    "add_sensors incoming sensor dict val: %s", list(val.values())
-                )
+    runtime = EntryRuntime(hub=hub)
+    entry.runtime_data = runtime
 
-                # collect all node ids present in the sensor dict (not only the first)
-                for key, value in val.items():
-                    if not value:
-                        continue
-                    # accept keys starting with nodeid_ / node_id_
-                    if key.startswith((CONF_NODE_ID, "node_id_")):
-                        node_id = value
-                        if node_id:
-                            if node_id not in self._node_key_pair:
-                                self._node_key_pair[node_id] = node_id
-                                _LOGGER.debug(
-                                    "Registered node_id %s (source key=%s) for hub %s",
-                                    node_id,
-                                    key,
-                                    self._hub.hub_name,
-                                )
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, hub.name)},
+        name=hub.name,
+        manufacturer=hub.config.manufacturer or None,
+        model=hub.config.model or None,
+    )
 
-        # schedule subscription setup in background
-        if not self._subscription_task or self._subscription_task.done():
-            self._subscription_task = asyncio.create_task(self.setup_subscription())
-        return True
+    if entry.options.get(CONF_DISCOVERY_ENABLED, False):
+        await _async_run_discovery(hass, entry, runtime)
+    if runtime.discovered_live or not entry.options.get(CONF_DISCOVERY_ENABLED, False):
+        _cleanup_registries(hass, entry)
 
-    async def setup_subscription(self) -> None:
-        """Instruct hub to (re)create the subscription for registered nodes."""
-        await self._hub.subscribe_nodes(self._node_key_pair)
+    await hass.config_entries.async_forward_entry_setups(entry, ENTRY_PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    return True
 
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Return cached values to Home Assistant on refresh."""
-        return {**self._hub.cache_val}
+
+async def _async_update_listener(
+    hass: HomeAssistant, entry: AsyncuaConfigEntry
+) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> bool:
+    """Unload a config entry."""
+    unloaded = await hass.config_entries.async_unload_platforms(entry, ENTRY_PLATFORMS)
+    if unloaded:
+        data = get_data(hass)
+        hub = entry.runtime_data.hub
+        if hub.name not in data.yaml_hubs:
+            await hub.async_stop()
+            data.hubs.pop(hub.name, None)
+    return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> None:
+    """Delete the stored discovery cache when an entry is removed."""
+    await Store(
+        hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}.discovery"
+    ).async_remove()

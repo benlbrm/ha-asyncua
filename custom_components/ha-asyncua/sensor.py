@@ -2,52 +2,68 @@
 
 from __future__ import annotations
 
-import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryError
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from asyncua import ua
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
+)
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.core import callback
 
-from . import AsyncuaCoordinator
 from .const import (
     CONF_NODE_DEVICE_CLASS,
     CONF_NODE_HUB,
     CONF_NODE_ID,
     CONF_NODE_NAME,
+    CONF_NODE_PRECISION,
     CONF_NODE_STATE_CLASS,
     CONF_NODE_UNIQUE_ID,
     CONF_NODE_UNIT_OF_MEASUREMENT,
     CONF_NODES,
-    DOMAIN,
+)
+from .discovery import FLOAT_TYPES, NUMERIC_TYPES
+from .entity import (
+    AsyncuaConfigEntry,
+    AsyncuaEntity,
+    async_setup_yaml_platform,
+    discovered_for,
+    nodeid_validator,
 )
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+    from .hub import OpcuaHub
 
-NODE_SCHEMA = {
-    CONF_NODES: [
-        {
-            vol.Optional(CONF_NODE_DEVICE_CLASS): cv.string,
-            vol.Optional(CONF_NODE_STATE_CLASS, default="measurement"): cv.string,
-            vol.Optional(CONF_NODE_UNIT_OF_MEASUREMENT): cv.string,
-            vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
-            vol.Required(CONF_NODE_ID): cv.string,
-            vol.Required(CONF_NODE_NAME): cv.string,
-            vol.Required(CONF_NODE_HUB): cv.string,
-        }
-    ]
-}
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_NODES): [
+            {
+                vol.Required(CONF_NODE_HUB): cv.string,
+                vol.Required(CONF_NODE_NAME): cv.string,
+                vol.Required(CONF_NODE_ID): nodeid_validator,
+                vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
+                vol.Optional(CONF_NODE_DEVICE_CLASS): vol.Coerce(SensorDeviceClass),
+                vol.Optional(CONF_NODE_STATE_CLASS): vol.Coerce(SensorStateClass),
+                vol.Optional(CONF_NODE_UNIT_OF_MEASUREMENT): cv.string,
+                vol.Optional(CONF_NODE_PRECISION): vol.All(
+                    vol.Coerce(int), vol.Range(0, 10)
+                ),
+            }
+        ]
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup_platform(
@@ -56,89 +72,93 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua sensors from YAML configuration."""
-    coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    entities: list[AsyncuaSensor] = []
+    """Set up sensors from YAML."""
 
-    # Regrouper les nodes par hub
-    for val_node in config[CONF_NODES]:
-        coordinator_nodes.setdefault(val_node[CONF_NODE_HUB], []).append(val_node)
+    def _factory(hub: OpcuaHub, conf: dict[str, Any]) -> AsyncuaSensor:
+        unit = conf.get(CONF_NODE_UNIT_OF_MEASUREMENT)
+        state_class = conf.get(CONF_NODE_STATE_CLASS)
+        if state_class is None and (unit or CONF_NODE_DEVICE_CLASS in conf):
+            # Previous versions always used "measurement"; keep it for numeric sensors.
+            state_class = SensorStateClass.MEASUREMENT
+        return AsyncuaSensor(
+            hub,
+            conf[CONF_NODE_ID],
+            name=conf[CONF_NODE_NAME],
+            unique_id=conf.get(CONF_NODE_UNIQUE_ID),
+            device_class=conf.get(CONF_NODE_DEVICE_CLASS),
+            state_class=state_class,
+            unit=unit,
+            precision=conf.get(CONF_NODE_PRECISION, 2),
+        )
 
-    for hub_name, nodes in coordinator_nodes.items():
-        if hub_name not in hass.data[DOMAIN]:
-            msg = f"Asyncua hub {hub_name} not found."
-            raise ConfigEntryError(msg)
-        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
-        coordinator.add_sensors(sensors=nodes)
+    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
 
-        for node in nodes:
-            entities.append(
-                AsyncuaSensor(
-                    coordinator=coordinator,
-                    name=node[CONF_NODE_NAME],
-                    hub=hub_name,
-                    node_id=node[CONF_NODE_ID],
-                    device_class=node.get(CONF_NODE_DEVICE_CLASS),
-                    state_class=node.get(CONF_NODE_STATE_CLASS, "measurement"),
-                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
-                    unit_of_measurement=node.get(CONF_NODE_UNIT_OF_MEASUREMENT),
-                )
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AsyncuaConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up discovered sensors."""
+    hub = entry.runtime_data.hub
+    entities = []
+    for var, device, enabled in discovered_for(entry, "sensor"):
+        vtype = ua.VariantType[var.vtype]
+        numeric = vtype in NUMERIC_TYPES
+        entities.append(
+            AsyncuaSensor(
+                hub,
+                var.nodeid,
+                name=var.name,
+                device_info=device,
+                enabled_default=enabled,
+                device_class=SensorDeviceClass.TIMESTAMP
+                if vtype is ua.VariantType.DateTime
+                else None,
+                state_class=SensorStateClass.MEASUREMENT if numeric else None,
+                unit=var.unit if numeric else None,
+                precision=2 if vtype in FLOAT_TYPES else (0 if numeric else None),
             )
-
+        )
     async_add_entities(entities)
 
 
-class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
-    """Representation of an OPCUA sensor."""
+class AsyncuaSensor(AsyncuaEntity, SensorEntity):
+    """OPC UA sensor."""
 
     def __init__(
         self,
-        coordinator: AsyncuaCoordinator,
-        name: str,
-        hub: str,
-        node_id: str,
-        device_class: str | None = None,
-        state_class: str = "measurement",
-        unique_id: str | None = None,
-        precision: int = 2,
-        unit_of_measurement: str | None = None,
+        hub: OpcuaHub,
+        nodeid: str,
+        *,
+        device_class: SensorDeviceClass | None = None,
+        state_class: SensorStateClass | None = None,
+        unit: str | None = None,
+        precision: int | None = 2,
+        **kwargs: Any,
     ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator=coordinator)
-        self._attr_name = name
-        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
-        self._attr_device_class = (
-            SensorDeviceClass(device_class)
-            if device_class and device_class in SensorDeviceClass.__members__.values()
-            else None
-        )
+        super().__init__(hub, nodeid, **kwargs)
+        self._attr_device_class = device_class
         self._attr_state_class = state_class
+        self._attr_native_unit_of_measurement = unit
         self._attr_suggested_display_precision = precision
-        self._attr_native_unit_of_measurement = unit_of_measurement
-        self._attr_native_value: Any = None
-        self._hub_name = hub
-        self._node_id = node_id
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
-
-    @property
-    def available(self) -> bool:
-        """Return True if the hub is connected and the node has a value."""
-        return self.coordinator.hub.connected
-
-    @property
-    def native_value(self) -> Any:
-        """Return the cached OPCUA value for this node."""
-        value = self.coordinator.hub.cache_val.get(self._node_id)
-        self._attr_native_value = value
-        return value
 
     @callback
-    def _handle_coordinator_update(self) -> None:
-        """Handle updated data from coordinator (triggered by subscription)."""
-        _LOGGER.debug(
-            "Sensor %s (%s) updated with value: %s",
-            self._attr_name,
-            self._node_id,
-            self.coordinator.hub.cache_val.get(self._node_id),
-        )
-        self.async_write_ha_state()
+    def _update_from_hub(self) -> None:
+        value = self.raw_value
+        if value is None:
+            self._attr_native_value = None
+        elif self._attr_device_class is SensorDeviceClass.TIMESTAMP:
+            self._attr_native_value = (
+                value.replace(tzinfo=UTC)
+                if isinstance(value, datetime) and value.tzinfo is None
+                else value
+            )
+        elif isinstance(value, bool):
+            self._attr_native_value = int(value)
+        elif hasattr(value, "Text"):  # LocalizedText
+            self._attr_native_value = value.Text
+        elif self._attr_state_class is not None and not isinstance(value, int | float):
+            self._attr_native_value = None
+        else:
+            self._attr_native_value = value

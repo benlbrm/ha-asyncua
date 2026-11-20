@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
+from asyncua import ua
+from homeassistant.components.number import (
+    PLATFORM_SCHEMA as NUMBER_PLATFORM_SCHEMA,
+)
 from homeassistant.components.number import NumberEntity, NumberMode
-from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
-from homeassistant.exceptions import ConfigEntryError
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import callback
 
-from . import AsyncuaCoordinator
 from .const import (
     CONF_NODE_HUB,
     CONF_NODE_ID,
@@ -27,33 +24,51 @@ from .const import (
     CONF_NODE_UNIQUE_ID,
     CONF_NODE_UNIT_OF_MEASUREMENT,
     CONF_NODES,
-    DOMAIN,
 )
+from .discovery import FLOAT_TYPES
+from .entity import (
+    AsyncuaConfigEntry,
+    AsyncuaEntity,
+    async_setup_yaml_platform,
+    discovered_for,
+    nodeid_validator,
+)
+from .hub import _INT_RANGES
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+    from .hub import OpcuaHub
 
-NODE_SCHEMA = {
-    CONF_NODES: [
-        {
-            vol.Required(CONF_NODE_HUB): cv.string,
-            vol.Required(CONF_NODE_NAME): cv.string,
-            vol.Required(CONF_NODE_ID): cv.string,
-            vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
-            vol.Optional(CONF_NODE_UNIT_OF_MEASUREMENT): cv.string,
-            vol.Optional(CONF_NODE_ID_NUMBER_MIN): vol.Coerce(float),
-            vol.Optional(CONF_NODE_ID_NUMBER_MAX): vol.Coerce(float),
-            vol.Optional(CONF_NODE_ID_NUMBER_STEP): vol.Coerce(float),
-            vol.Optional(CONF_NODE_ID_NUMBER_MODE, default="auto"): cv.string,
-        }
-    ]
-}
+PLATFORM_SCHEMA = NUMBER_PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_NODES): [
+            {
+                vol.Required(CONF_NODE_HUB): cv.string,
+                vol.Required(CONF_NODE_NAME): cv.string,
+                vol.Required(CONF_NODE_ID): nodeid_validator,
+                vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
+                vol.Optional(CONF_NODE_UNIT_OF_MEASUREMENT): cv.string,
+                vol.Optional(CONF_NODE_ID_NUMBER_MIN): vol.Coerce(float),
+                vol.Optional(CONF_NODE_ID_NUMBER_MAX): vol.Coerce(float),
+                vol.Optional(CONF_NODE_ID_NUMBER_STEP): vol.Coerce(float),
+                vol.Optional("min_value"): vol.Coerce(float),
+                vol.Optional("max_value"): vol.Coerce(float),
+                vol.Optional("step"): vol.Coerce(float),
+                vol.Optional("mode"): vol.Coerce(NumberMode),
+                vol.Optional(CONF_NODE_ID_NUMBER_MODE, default="auto"): vol.Coerce(
+                    NumberMode
+                ),
+            }
+        ]
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
+# Bounds used for float variables without a usable EURange.
+FLOAT_BOUND = 1e9
 
 
 async def async_setup_platform(
@@ -62,134 +77,90 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua numbers from YAML configuration."""
-    coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    entities: list[AsyncuaNumber] = []
+    """Set up numbers from YAML."""
 
-    for val_node in config[CONF_NODES]:
-        coordinator_nodes.setdefault(val_node[CONF_NODE_HUB], []).append(val_node)
+    def _factory(hub: OpcuaHub, conf: dict[str, Any]) -> AsyncuaNumber:
+        return AsyncuaNumber(
+            hub,
+            conf[CONF_NODE_ID],
+            name=conf[CONF_NODE_NAME],
+            unique_id=conf.get(CONF_NODE_UNIQUE_ID),
+            unit=conf.get(CONF_NODE_UNIT_OF_MEASUREMENT),
+            # README keys (min_value...) and legacy nodeid_number_* keys are both accepted.
+            min_value=conf.get("min_value", conf.get(CONF_NODE_ID_NUMBER_MIN)),
+            max_value=conf.get("max_value", conf.get(CONF_NODE_ID_NUMBER_MAX)),
+            step=conf.get("step", conf.get(CONF_NODE_ID_NUMBER_STEP)),
+            mode=conf.get("mode", conf.get(CONF_NODE_ID_NUMBER_MODE, NumberMode.AUTO)),
+        )
 
-    for hub_name, nodes in coordinator_nodes.items():
-        if hub_name not in hass.data[DOMAIN]:
-            msg = f"Asyncua hub {hub_name} not found."
-            raise ConfigEntryError(msg)
-        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
-        coordinator.add_sensors(sensors=nodes)
+    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
 
-        for node in nodes:
-            entities.append(
-                AsyncuaNumber(
-                    coordinator=coordinator,
-                    name=node[CONF_NODE_NAME],
-                    hub=hub_name,
-                    node_id=node[CONF_NODE_ID],
-                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
-                    unit_of_measurement=node.get(CONF_NODE_UNIT_OF_MEASUREMENT),
-                    min_value=node.get(CONF_NODE_ID_NUMBER_MIN),
-                    max_value=node.get(CONF_NODE_ID_NUMBER_MAX),
-                    step=node.get(CONF_NODE_ID_NUMBER_STEP),
-                    mode=node.get(CONF_NODE_ID_NUMBER_MODE, "auto"),
-                )
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AsyncuaConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up discovered numbers."""
+    hub = entry.runtime_data.hub
+    entities = []
+    for var, device, enabled in discovered_for(entry, "number"):
+        vtype = ua.VariantType[var.vtype]
+        if vtype in FLOAT_TYPES:
+            low, high, step = -FLOAT_BOUND, FLOAT_BOUND, 0.001
+        else:
+            low, high = _INT_RANGES[vtype]
+            step = 1.0
+        entities.append(
+            AsyncuaNumber(
+                hub,
+                var.nodeid,
+                name=var.name,
+                device_info=device,
+                enabled_default=enabled,
+                unit=var.unit,
+                min_value=var.min_value if var.min_value is not None else float(low),
+                max_value=var.max_value if var.max_value is not None else float(high),
+                step=step,
+                mode=NumberMode.BOX,
             )
-
+        )
     async_add_entities(entities)
 
 
-class AsyncuaNumber(CoordinatorEntity[AsyncuaCoordinator], NumberEntity):
-    """OPC UA number entity using coordinator cache."""
+class AsyncuaNumber(AsyncuaEntity, NumberEntity):
+    """OPC UA number (setpoint)."""
 
     def __init__(
         self,
-        coordinator: AsyncuaCoordinator,
-        name: str,
-        hub: str,
-        node_id: str,
-        unique_id: str | None = None,
-        unit_of_measurement: str | None = None,
+        hub: OpcuaHub,
+        nodeid: str,
+        *,
+        unit: str | None = None,
         min_value: float | None = None,
         max_value: float | None = None,
         step: float | None = None,
-        mode: str = "auto",
+        mode: NumberMode = NumberMode.AUTO,
+        **kwargs: Any,
     ) -> None:
-        super().__init__(coordinator=coordinator)
-        self._attr_name = name
-        self._node_id = node_id
-        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
-        self._attr_available = STATE_UNAVAILABLE
-        self._attr_native_value: float | None = None
-        self._attr_native_unit_of_measurement = unit_of_measurement
-
-        # Number specific attributes
+        super().__init__(hub, nodeid, **kwargs)
+        self._attr_native_unit_of_measurement = unit
         if min_value is not None:
             self._attr_native_min_value = min_value
         if max_value is not None:
             self._attr_native_max_value = max_value
         if step is not None:
             self._attr_native_step = step
+        self._attr_mode = mode
 
-        # Mode: auto, box, or slider
-        if mode == "box":
-            self._attr_mode = NumberMode.BOX
-        elif mode == "slider":
-            self._attr_mode = NumberMode.SLIDER
-        else:
-            self._attr_mode = NumberMode.AUTO
-
-    @property
-    def available(self) -> bool:
-        return self.coordinator.hub.connected
-
-    @property
-    def native_value(self) -> float | None:
-        if not self.coordinator.hub.connected:
-            self._attr_available = STATE_UNAVAILABLE
-            return None
-        val = self.coordinator.hub.cache_val.get(self._node_id)
-        if val is not None:
-            try:
-                self._attr_native_value = float(val)
-            except (ValueError, TypeError):
-                self._attr_native_value = None
-        self._attr_available = STATE_OK
-        return self._attr_native_value
+    @callback
+    def _update_from_hub(self) -> None:
+        value = self.raw_value
+        try:
+            self._attr_native_value = None if value is None else float(value)
+        except TypeError, ValueError:
+            self._attr_native_value = None
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set the value of the number on the OPC UA server."""
-        hub = self.coordinator.hub
-
-        # Ensure connection
-        if not hub.connected:
-            _LOGGER.debug(
-                "Hub disconnected, attempting reconnect before writing number"
-            )
-            try:
-                await asyncio.wait_for(hub.connect(), timeout=5)
-            except Exception as e:
-                _LOGGER.exception("Reconnect before write failed: %s", e)
-                self._attr_available = STATE_UNAVAILABLE
-                self.async_write_ha_state()
-                return
-
-        # Optimistic update
-        self._attr_native_value = value
-        self.async_write_ha_state()
-
-        # Perform write with timeout
-        try:
-            await asyncio.wait_for(
-                hub.set_value(nodeid=self._node_id, value=value), timeout=5
-            )
-        except Exception as e:
-            _LOGGER.exception("Write failed for %s: %s", self._attr_name, e)
-            asyncio.create_task(hub.schedule_reconnect())
-            self._attr_available = STATE_UNAVAILABLE
-            self.async_write_ha_state()
-            return
-
-        # Delayed refresh for eventual subscription push
-        async def delayed_refresh() -> None:
-            await asyncio.sleep(0.5)
-            await self.coordinator.async_request_refresh()
-
-        asyncio.create_task(delayed_refresh())
+        """Write the value (converted to the node data type by the hub)."""
+        await self.hub.async_write(self._state_nodeid, value)

@@ -1,0 +1,5 @@
+# pytest-homeassistant-custom-component pins its own Home Assistant version
+# (0.13.375 -> homeassistant 2026.10.4, latest plugin release available).
+asyncua==2.1.0
+pytest-homeassistant-custom-component==0.13.375
+ruff==0.17.6

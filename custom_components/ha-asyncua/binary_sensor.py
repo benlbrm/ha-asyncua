@@ -2,29 +2,35 @@
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant.components.binary_sensor import (
+    PLATFORM_SCHEMA as BINARY_SENSOR_PLATFORM_SCHEMA,
+)
+from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
-from homeassistant.const import STATE_OK, STATE_UNAVAILABLE
-from homeassistant.exceptions import ConfigEntryError
-from homeassistant.helpers.config_validation import PLATFORM_SCHEMA
-from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.const import EntityCategory
+from homeassistant.core import callback
 
-from . import AsyncuaCoordinator
 from .const import (
+    CONF_NODE_DEVICE_CLASS,
     CONF_NODE_HUB,
     CONF_NODE_ID,
     CONF_NODE_NAME,
     CONF_NODE_UNIQUE_ID,
     CONF_NODES,
-    DOMAIN,
+)
+from .entity import (
+    AsyncuaConfigEntry,
+    AsyncuaEntity,
+    async_setup_yaml_platform,
+    discovered_for,
+    hub_device_info,
+    nodeid_validator,
 )
 
 if TYPE_CHECKING:
@@ -32,20 +38,24 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-_LOGGER = logging.getLogger(__name__)
+    from .hub import OpcuaHub
 
-NODE_SCHEMA = {
-    CONF_NODES: [
-        {
-            vol.Required(CONF_NODE_HUB): cv.string,
-            vol.Required(CONF_NODE_NAME): cv.string,
-            vol.Required(CONF_NODE_ID): cv.string,
-            vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
-        }
-    ]
-}
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(schema=NODE_SCHEMA, extra=vol.ALLOW_EXTRA)
+PLATFORM_SCHEMA = BINARY_SENSOR_PLATFORM_SCHEMA.extend(
+    {
+        vol.Required(CONF_NODES): [
+            {
+                vol.Required(CONF_NODE_HUB): cv.string,
+                vol.Required(CONF_NODE_NAME): cv.string,
+                vol.Required(CONF_NODE_ID): nodeid_validator,
+                vol.Optional(CONF_NODE_UNIQUE_ID): cv.string,
+                vol.Optional(CONF_NODE_DEVICE_CLASS): vol.Coerce(
+                    BinarySensorDeviceClass
+                ),
+            }
+        ]
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 async def async_setup_platform(
@@ -54,76 +64,87 @@ async def async_setup_platform(
     async_add_entities: AddEntitiesCallback,
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up asyncua Binary Sensors from YAML configuration."""
-    coordinator_nodes: dict[str, list[dict[str, str]]] = {}
-    entities: list = []
+    """Set up binary sensors from YAML."""
 
-    for val_node in config[CONF_NODES]:
-        coordinator_nodes.setdefault(val_node[CONF_NODE_HUB], []).append(val_node)
+    def _factory(hub: OpcuaHub, conf: dict[str, Any]) -> AsyncuaBinarySensor:
+        return AsyncuaBinarySensor(
+            hub,
+            conf[CONF_NODE_ID],
+            name=conf[CONF_NODE_NAME],
+            unique_id=conf.get(CONF_NODE_UNIQUE_ID),
+            device_class=conf.get(CONF_NODE_DEVICE_CLASS),
+        )
 
-    for hub_name, nodes in coordinator_nodes.items():
-        if hub_name not in hass.data[DOMAIN]:
-            msg = f"Asyncua hub {hub_name} not found."
-            raise ConfigEntryError(msg)
-        coordinator: AsyncuaCoordinator = hass.data[DOMAIN][hub_name]
-        coordinator.add_sensors(sensors=nodes)
+    await async_setup_yaml_platform(hass, config, async_add_entities, _factory)
 
-        for node in nodes:
-            entities.append(
-                AsyncuaBinarySensor(
-                    coordinator=coordinator,
-                    name=node[CONF_NODE_NAME],
-                    hub=hub_name,
-                    node_id=node[CONF_NODE_ID],
-                    unique_id=node.get(CONF_NODE_UNIQUE_ID),
-                )
-            )
 
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: AsyncuaConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up the connectivity sensor and discovered binary sensors."""
+    hub = entry.runtime_data.hub
+    entities: list[BinarySensorEntity] = [AsyncuaConnectivitySensor(hub)]
+    entities.extend(
+        AsyncuaBinarySensor(
+            hub, var.nodeid, name=var.name, device_info=device, enabled_default=enabled
+        )
+        for var, device, enabled in discovered_for(entry, "binary_sensor")
+    )
     async_add_entities(entities)
 
 
-class AsyncuaBinarySensor(CoordinatorEntity[AsyncuaCoordinator], BinarySensorEntity):
-    """OPC UA Binary sensor using coordinator cache."""
-
-    _attr_device_class = BinarySensorDeviceClass.OCCUPANCY
+class AsyncuaBinarySensor(AsyncuaEntity, BinarySensorEntity):
+    """OPC UA binary sensor."""
 
     def __init__(
         self,
-        coordinator: AsyncuaCoordinator,
-        name: str,
-        hub: str,
-        node_id: str,
-        unique_id: str | None = None,
+        hub: OpcuaHub,
+        nodeid: str,
+        *,
+        device_class: BinarySensorDeviceClass | None = None,
+        **kwargs: Any,
     ) -> None:
-        super().__init__(coordinator=coordinator)
-        self._attr_name = name
-        self._node_id = node_id
-        self._attr_unique_id = unique_id or f"{DOMAIN}.{hub}.{node_id}"
-        self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, hub)})
-        self._attr_available = STATE_UNAVAILABLE
-        self._attr_is_on: bool | None = None
+        super().__init__(hub, nodeid, **kwargs)
+        self._attr_device_class = device_class
 
-    @property
-    def available(self) -> bool:
-        """Availability based on hub connection."""
-        return self.coordinator.hub.connected
+    @callback
+    def _update_from_hub(self) -> None:
+        value = self.raw_value
+        self._attr_is_on = None if value is None else bool(value)
 
-    @property
-    def is_on(self) -> bool | None:
-        """Return True if the cached value is truthy."""
-        if not self.coordinator.hub.connected:
-            self._attr_available = STATE_UNAVAILABLE
-            return None
-        val = self.coordinator.hub.cache_val.get(self._node_id)
-        try:
-            self._attr_is_on = bool(val) if val is not None else False
-        except Exception:
-            _LOGGER.warning("Cannot convert %s to bool for node %s", val, self._node_id)
-            self._attr_is_on = False
-        self._attr_available = STATE_OK
-        return self._attr_is_on
+
+class AsyncuaConnectivitySensor(BinarySensorEntity):
+    """Connection status of the OPC UA server."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "connected"
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hub: OpcuaHub) -> None:
+        self._hub = hub
+        self._attr_unique_id = f"{hub.name}_connected"
+        self._attr_device_info = hub_device_info(hub)
 
     async def async_added_to_hass(self) -> None:
-        """Register coordinator listener and request refresh when added."""
-        await super().async_added_to_hass()
-        await self.coordinator.async_request_refresh()
+        """Follow the hub connection status."""
+        self.async_on_remove(
+            self._hub.async_add_connection_listener(self.async_write_ha_state)
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True when connected."""
+        return self._hub.connected
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose subscription counters."""
+        return {
+            "monitored_nodes": self._hub.subscribed_count,
+            "failed_nodes": len(self._hub.failed_nodes),
+            "last_error": self._hub.last_error,
+        }

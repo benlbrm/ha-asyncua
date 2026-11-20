@@ -1,22 +1,144 @@
 {
-    "services": {
-        "set_value": {
-            "description": "Write a value to an opcua node.",
-            "fields": {
-                "hub": {
-                    "description": "OPCUA hub name of the node configured in the asyncua section.",
-                    "name": "hub"
-                },
-                "nodeid": {
-                    "description": "Nodeid to be written.",
-                    "name": "nodeid"
-                },
-                "value": {
-                    "description": "Value (single value) to write. Can be int, float, bool, string, byte",
-                    "name": "value"
-                }
-            },
-            "name": "set value"
+  "config": {
+    "step": {
+      "user": {
+        "title": "OPC UA server",
+        "description": "Connect to an OPC UA server (PLC).",
+        "data": {
+          "name": "Name (unique hub id)",
+          "url": "Server URL",
+          "username": "Username",
+          "password": "Password",
+          "security_policy": "Security policy",
+          "security_mode": "Security mode",
+          "publishing_interval": "Publishing interval (ms)",
+          "manufacturer": "Manufacturer",
+          "model": "Model"
+        },
+        "data_description": {
+          "security_policy": "With a policy other than None, a client certificate is created at {certificate}: it must be trusted on the server (PLC) before the connection succeeds."
         }
+      },
+      "reconfigure": {
+        "title": "OPC UA server",
+        "data": {
+          "url": "Server URL",
+          "username": "Username",
+          "password": "Password",
+          "security_policy": "Security policy",
+          "security_mode": "Security mode",
+          "publishing_interval": "Publishing interval (ms)",
+          "manufacturer": "Manufacturer",
+          "model": "Model"
+        },
+        "data_description": {
+          "security_policy": "With a policy other than None, a client certificate is created at {certificate}: it must be trusted on the server (PLC) before the connection succeeds."
+        }
+      },
+      "discovery": {
+        "title": "Discovery",
+        "description": "Choose which variables are created as entities. You can change this later in the integration options.",
+        "data": {
+          "discovery_enabled": "Discover variables automatically",
+          "discovery_root": "Root node to browse",
+          "discovery_max_depth": "Maximum browse depth",
+          "discovery_include": "Include (regex on path or node id)",
+          "discovery_exclude": "Exclude (regex on path or node id)",
+          "discovery_namespaces": "Namespaces (comma separated indexes, empty = all)",
+          "discovery_writable": "Controllable variables (regex)"
+        },
+        "data_description": {
+          "discovery_root": "i=85 is the Objects folder.",
+          "discovery_include": "Example: `Global PV|Heaters`",
+          "discovery_exclude": "Example: `TON_|_old$` to hide function block internals.",
+          "discovery_namespaces": "Servers often expose the same variables in several namespaces (e.g. B&R ns=6 and PLCopen ns=7): keep only one.",
+          "discovery_writable": "Writable variables matching this regex become switches / numbers / texts. Every other variable is read-only. Empty = nothing can be written from Home Assistant."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the server. {details}",
+      "invalid_auth": "Invalid username or password.",
+      "security_error": "The server rejected the secure connection (is the client certificate trusted on the PLC?).",
+      "invalid_nodeid": "Invalid node id (example: i=85 or ns=6;s=::AsGlobalPV).",
+      "invalid_regex": "Invalid regular expression.",
+      "invalid_namespaces": "Use comma separated numbers, e.g. 2,6."
+    },
+    "abort": {
+      "already_configured": "This hub is already configured.",
+      "reconfigure_successful": "Reconfiguration successful.",
+      "yaml_managed": "This hub is defined in configuration.yaml: edit it there."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Discovery",
+        "description": "Server namespaces: {namespaces}",
+        "data": {
+          "discovery_enabled": "Discover variables automatically",
+          "discovery_root": "Root node to browse",
+          "discovery_max_depth": "Maximum browse depth",
+          "discovery_include": "Include (regex on path or node id)",
+          "discovery_exclude": "Exclude (regex on path or node id)",
+          "discovery_namespaces": "Namespaces (comma separated indexes, empty = all)",
+          "discovery_writable": "Controllable variables (regex)"
+        },
+        "data_description": {
+          "discovery_root": "i=85 is the Objects folder.",
+          "discovery_include": "Example: `Global PV|Heaters`",
+          "discovery_exclude": "Example: `TON_|_old$` to hide function block internals.",
+          "discovery_namespaces": "Servers often expose the same variables in several namespaces (e.g. B&R ns=6 and PLCopen ns=7): keep only one.",
+          "discovery_writable": "Writable variables matching this regex become switches / numbers / texts. Every other variable is read-only. Empty = nothing can be written from Home Assistant."
+        }
+      }
+    },
+    "error": {
+      "invalid_nodeid": "Invalid node id (example: i=85 or ns=6;s=::AsGlobalPV).",
+      "invalid_regex": "Invalid regular expression.",
+      "invalid_namespaces": "Use comma separated numbers, e.g. 2,6."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
+    "button": {
+      "rediscover": {
+        "name": "Rediscover variables"
+      }
+    }
+  },
+  "services": {
+    "set_value": {
+      "name": "Set value",
+      "description": "Write a value to an OPC UA node.",
+      "fields": {
+        "hub": {
+          "name": "Hub",
+          "description": "Name of the OPC UA hub."
+        },
+        "nodeid": {
+          "name": "Node id",
+          "description": "Node to write, e.g. ns=6;s=::AsGlobalPV:setpoint."
+        },
+        "value": {
+          "name": "Value",
+          "description": "Value, converted to the node data type."
+        }
+      }
+    },
+    "rediscover": {
+      "name": "Rediscover",
+      "description": "Browse the server again and update discovered entities.",
+      "fields": {
+        "hub": {
+          "name": "Hub",
+          "description": "Name of the OPC UA hub."
+        }
+      }
+    }
+  }
 }
