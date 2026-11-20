@@ -73,7 +73,7 @@ from .entity import (
     nodeid_validator,
     yaml_nodeids,
 )
-from .hub import HubConfig, OpcuaHub, normalize_nodeid
+from .hub import HubConfig, OpcuaHub, normalize_nodeid, without_unused_security
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -197,7 +197,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         data.hubs[hub.name] = hub
         data.yaml_hubs.add(hub.name)
         await hub.async_start()
-        import_data = {k: hub_conf[k] for k in HUB_KEYS if hub_conf.get(k) is not None}
+        import_data = without_unused_security(
+            {k: hub_conf[k] for k in HUB_KEYS if hub_conf.get(k) is not None}
+        )
         hass.async_create_task(
             hass.config_entries.flow.async_init(
                 DOMAIN, context={"source": SOURCE_IMPORT}, data=import_data
@@ -238,6 +240,12 @@ def _register_services(hass: HomeAssistant) -> None:
         entry = hass.config_entries.async_entry_for_domain_unique_id(DOMAIN, name)
         if entry is None:
             msg = f"OPC UA hub {name!r} has no config entry"
+            raise ServiceValidationError(msg)
+        if not entry.options.get(CONF_DISCOVERY_ENABLED, False):
+            msg = (
+                f"Discovery is disabled for OPC UA hub {name!r}: enable it in "
+                "Settings > Devices & services > OPC UA (asyncua) > Configure"
+            )
             raise ServiceValidationError(msg)
         hass.config_entries.async_schedule_reload(entry.entry_id)
 
@@ -332,7 +340,9 @@ def _cleanup_registries(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> None:
     expected_entities = {
         default_unique_id(hub.name, v.nodeid) for v in runtime.variables
     }
-    expected_entities |= {f"{hub.name}_connected", f"{hub.name}_rediscover"}
+    expected_entities.add(f"{hub.name}_connected")
+    if entry.options.get(CONF_DISCOVERY_ENABLED, False):
+        expected_entities.add(f"{hub.name}_rediscover")
     ent_reg = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
         if ent.unique_id not in expected_entities:
@@ -375,6 +385,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
 
     if entry.options.get(CONF_DISCOVERY_ENABLED, False):
         await _async_run_discovery(hass, entry, runtime)
+    else:
+        _LOGGER.info(
+            "Discovery is disabled for OPC UA hub %s%s: enable it in the "
+            "integration options (Configure) to add the server variables",
+            hub.name,
+            " (imported from YAML)" if entry.source == SOURCE_IMPORT else "",
+        )
     if runtime.discovered_live or not entry.options.get(CONF_DISCOVERY_ENABLED, False):
         _cleanup_registries(hass, entry)
 

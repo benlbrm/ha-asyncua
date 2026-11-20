@@ -38,7 +38,7 @@ Connect industrial PLCs and any OPC UA server to Home Assistant. Values are **pu
 1. **Connection**: name (unique hub id, used by YAML entities and services), URL (`opc.tcp://host:4840`), optional username / password, security policy, publishing interval. The connection is tested before going further.
 2. **Discovery**: choose what to browse and which variables may be controlled (see below).
 
-The server becomes a device with two diagnostic entities: **Connected** and a **Rediscover variables** button. Connection settings can be changed later with **Reconfigure**, discovery settings with **Configure**.
+The server becomes a device with a **Connected** diagnostic entity and, when discovery is enabled, a **Rediscover variables** button. Connection settings can be changed later with **Reconfigure**, discovery settings with **Configure**.
 
 ## Automatic discovery
 
@@ -264,7 +264,7 @@ logger:
 
 ## Upgrading from 0.1.x
 
-- YAML hubs now also appear in **Devices & services** (discovery disabled for them until you enable it in **Configure**).
+- YAML hubs now also appear in **Devices & services**. Discovery is **disabled** for them (nothing is browsed, an info log says so) until you enable it in **Configure** (for B&R, set *Namespaces* to `6`).
 - Entity unique ids are unchanged, so existing entities, names and history are kept.
 - `binary_sensor`: the configured `device_class` is now honoured (it was always *occupancy*).
 - `cover`: only the features whose nodes are configured are offered.

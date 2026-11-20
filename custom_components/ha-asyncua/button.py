@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 
+from .const import CONF_DISCOVERY_ENABLED
 from .entity import AsyncuaConfigEntry, hub_device_info
 
 if TYPE_CHECKING:
@@ -19,8 +20,9 @@ async def async_setup_entry(
     entry: AsyncuaConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the rediscover button."""
-    async_add_entities([AsyncuaRediscoverButton(entry)])
+    """Set up the rediscover button (only useful when discovery is enabled)."""
+    if entry.options.get(CONF_DISCOVERY_ENABLED, False):
+        async_add_entities([AsyncuaRediscoverButton(entry)])
 
 
 class AsyncuaRediscoverButton(ButtonEntity):

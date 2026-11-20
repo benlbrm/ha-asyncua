@@ -19,6 +19,8 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
+    CONF_HUB_SECURITY_MODE,
+    CONF_HUB_SECURITY_POLICY,
     DEFAULT_PUBLISHING_INTERVAL,
     DEFAULT_SECURITY_MODE,
     DOMAIN,
@@ -26,7 +28,7 @@ from .const import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from asyncua.common.node import Node
     from asyncua.common.subscription import DataChangeNotif, Subscription
@@ -58,6 +60,17 @@ _INT_RANGES: dict[ua.VariantType, tuple[int, int]] = {
 _FLOAT_TYPES = (ua.VariantType.Float, ua.VariantType.Double)
 _TRUE_STRINGS = frozenset(("1", "true", "on", "yes"))
 _FALSE_STRINGS = frozenset(("0", "false", "off", "no"))
+
+
+def without_unused_security(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop the security mode when no security policy is used (it has no effect)."""
+    result = dict(data)
+    if (
+        result.get(CONF_HUB_SECURITY_POLICY, SECURITY_POLICY_NONE)
+        == SECURITY_POLICY_NONE
+    ):
+        result.pop(CONF_HUB_SECURITY_MODE, None)
+    return result
 
 
 def normalize_nodeid(nodeid: str) -> str:
