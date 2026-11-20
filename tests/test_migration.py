@@ -111,6 +111,17 @@ async def test_old_yaml_still_works(hass: HomeAssistant, opc_server: OpcServer) 
         f"{OLD}.plc.{opc_server.nodeid('Temperature')}",
         suggested_object_id="boiler",
     )
+    # Custom YAML unique id (no domain prefix): must not conflict with itself.
+    vmc = ent_reg.async_get_or_create(
+        "switch", OLD, "vmc_switch", suggested_object_id="vmc_switch"
+    )
+    # Half-migrated registry (a previous start stopped midway).
+    already = ent_reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        f"{DOMAIN}.plc.{opc_server.nodeid('Running')}",
+        suggested_object_id="running",
+    )
     config = {
         OLD: [{"name": "plc", "url": opc_server.url}],
         "sensor": [
@@ -125,13 +136,45 @@ async def test_old_yaml_still_works(hass: HomeAssistant, opc_server: OpcServer) 
                 ],
             }
         ],
+        "switch": [
+            {
+                "platform": OLD,
+                "nodes": [
+                    {
+                        "name": "VMC",
+                        "hub": "plc",
+                        "unique_id": "vmc_switch",
+                        "nodeid": opc_server.nodeid("cmdStart"),
+                    }
+                ],
+            }
+        ],
+        "binary_sensor": [
+            {
+                "platform": DOMAIN,
+                "nodes": [
+                    {
+                        "name": "Running",
+                        "hub": "plc",
+                        "nodeid": opc_server.nodeid("Running"),
+                    }
+                ],
+            }
+        ],
     }
-    for domain in ("sensor", DOMAIN):
+    for domain in ("sensor", "switch", "binary_sensor", DOMAIN):
         assert await async_setup_component(hass, domain, config)
     await _wait(lambda: not hass.config_entries.async_entries(OLD))
     await hass.async_block_till_done()
 
     assert ent_reg.async_get(temp.entity_id).platform == DOMAIN
+    migrated_vmc = ent_reg.async_get(vmc.entity_id)
+    assert migrated_vmc.platform == DOMAIN
+    assert migrated_vmc.unique_id == "vmc_switch"
+    await _wait(
+        lambda: (s := hass.states.get("switch.vmc_switch")) and s.state == "off"
+    )
+    await _wait(lambda: (s := hass.states.get(already.entity_id)) and s.state == "on")
     await _wait(lambda: (s := hass.states.get("sensor.boiler")) and s.state == "21.5")
     (entry,) = hass.config_entries.async_entries(DOMAIN)
     assert entry.source == SOURCE_IMPORT

@@ -187,7 +187,10 @@ def _collect_yaml_nodeids(config: ConfigType) -> dict[str, set[str]]:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up YAML hubs and the integration services."""
     # Before any platform loads, so migrated entities keep their entity ids.
-    async_migrate_registries(hass)
+    try:
+        async_migrate_registries(hass)
+    except Exception:
+        _LOGGER.exception("Migration from the former domain failed")
 
     data = get_data(hass)
     data.yaml_nodeids = _collect_yaml_nodeids(config)
@@ -231,7 +234,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         for entry in hass.config_entries.async_entries(domain):
             if entry.source == SOURCE_IMPORT and entry.unique_id not in data.yaml_hubs:
                 hass.async_create_task(hass.config_entries.async_remove(entry.entry_id))
-    async_migrate_config_entries(hass)
+    try:
+        async_migrate_config_entries(hass)
+    except Exception:
+        _LOGGER.exception("Migration of former config entries failed")
 
     # YAML entities still declared with the former domain: load them anyway.
     for domain in YAML_PLATFORMS:
@@ -409,7 +415,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: AsyncuaConfigEntry) -> b
 
     runtime = EntryRuntime(hub=hub)
     entry.runtime_data = runtime
-    await async_adopt_old_entry(hass, entry)
+    try:
+        await async_adopt_old_entry(hass, entry)
+    except Exception:
+        _LOGGER.exception("Migration of the former %s entry failed", hub.name)
 
     runtime.hub_device_id = (
         dr.async_get(hass)

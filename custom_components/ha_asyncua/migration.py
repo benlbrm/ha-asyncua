@@ -55,11 +55,26 @@ def async_migrate_registries(hass: HomeAssistant) -> None:
             # Already migrated (or re-created meanwhile): drop the stale copy.
             ent_reg.async_remove(entity.entity_id)
             continue
-        kwargs: dict[str, Any] = {"new_unique_id": unique_id}
+        kwargs: dict[str, Any] = {}
+        if unique_id != entity.unique_id:
+            # Only when it changes: HA checks the new unique id against the old
+            # platform without excluding the entity itself (custom YAML unique
+            # ids such as "vmc_switch" would conflict with themselves).
+            kwargs["new_unique_id"] = unique_id
         if entity.config_entry_id is not None:
             # Still linked to the old entry until the new entry adopts it.
             kwargs["new_config_entry_id"] = entity.config_entry_id
-        ent_reg.async_update_entity_platform(entity.entity_id, DOMAIN, **kwargs)
+        try:
+            ent_reg.async_update_entity_platform(entity.entity_id, DOMAIN, **kwargs)
+        except ValueError as err:
+            # Never block the setup: the entity is simply created again.
+            _LOGGER.warning(
+                "Could not migrate %s to the %s domain: %s",
+                entity.entity_id,
+                DOMAIN,
+                err,
+            )
+            continue
         _LOGGER.info("Migrated %s to the %s domain", entity.entity_id, DOMAIN)
 
     dev_reg = dr.async_get(hass)
@@ -70,9 +85,12 @@ def async_migrate_registries(hass: HomeAssistant) -> None:
         new = {(DOMAIN, i[1]) for i in old}
         if any(dev_reg.async_get_device(identifiers={i}) for i in new):
             continue
-        dev_reg.async_update_device(
-            device.id, new_identifiers=(device.identifiers - old) | new
-        )
+        try:
+            dev_reg.async_update_device(
+                device.id, new_identifiers=(device.identifiers - old) | new
+            )
+        except Exception as err:
+            _LOGGER.warning("Could not migrate device %s: %s", device.name, err)
 
 
 @callback
