@@ -335,7 +335,8 @@ async def async_discover(  # noqa: C901
 
     if truncated:
         _LOGGER.warning(
-            "OPC UA discovery truncated (more than %d variables): refine the filters",
+            "OPC UA discovery truncated (more than %d variables): restrict it in the "
+            "integration options (Configure), e.g. keep one namespace or set a root node",
             DISCOVERY_MAX_VARIABLES,
         )
     return variables, truncated

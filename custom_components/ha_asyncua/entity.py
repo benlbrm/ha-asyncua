@@ -57,6 +57,7 @@ class EntryRuntime:
     variables: list[DiscoveredVariable] = field(default_factory=list)
     truncated: bool = False
     discovered_live: bool = False
+    hub_device_id: str | None = None
 
 
 type AsyncuaConfigEntry = ConfigEntry[EntryRuntime]
@@ -78,15 +79,19 @@ def hub_device_info(hub: OpcuaHub) -> DeviceInfo:
     )
 
 
-def variable_device_info(hub: OpcuaHub, var: DiscoveredVariable) -> DeviceInfo:
+def variable_device_info(
+    hub: OpcuaHub, var: DiscoveredVariable, hub_device_id: str | None
+) -> DeviceInfo:
     """Device of a discovered variable: its parent OPC UA object, or the hub."""
     if not var.device_id:
         return hub_device_info(hub)
-    return DeviceInfo(
+    info = DeviceInfo(
         identifiers={(DOMAIN, f"{hub.name}:{var.device_id}")},
         name=var.device_name,
-        via_device=(DOMAIN, hub.name),
     )
+    if hub_device_id is not None:
+        info["via_device_id"] = hub_device_id
+    return info
 
 
 def default_unique_id(hub_name: str, nodeid: str) -> str:
@@ -212,7 +217,7 @@ def discovered_for(
     runtime = entry.runtime_data
     enabled = len(runtime.variables) <= DISCOVERY_ENABLE_THRESHOLD
     return [
-        (var, variable_device_info(runtime.hub, var), enabled)
+        (var, variable_device_info(runtime.hub, var, runtime.hub_device_id), enabled)
         for var in runtime.variables
         if var.platform == platform
     ]
