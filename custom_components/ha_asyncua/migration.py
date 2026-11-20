@@ -78,7 +78,7 @@ def async_migrate_registries(hass: HomeAssistant) -> None:
         _LOGGER.info("Migrated %s to the %s domain", entity.entity_id, DOMAIN)
 
     dev_reg = dr.async_get(hass)
-    for device in list(dev_reg.devices.values()):
+    for device in list(dev_reg.devices):
         old = {i for i in device.identifiers if i[0] == OLD_DOMAIN}
         if not old:
             continue
